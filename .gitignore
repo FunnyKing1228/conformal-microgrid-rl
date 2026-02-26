@@ -205,3 +205,43 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# ============================================================
+# conformal-microgrid-rl 專案特有規則
+# ============================================================
+
+# --- 模型權重（體積大，另行管理）---
+*.pth
+*.pt
+*.ckpt
+*.pkl
+# 如需追蹤特定最終模型，可用：git add -f models/best_sac_model.pth
+
+# --- 實驗跑出來的暫存結果 ---
+experiments/
+ablation_results/
+stressm_analysis_results/
+batch_logs/
+
+# --- 大型資料檔 ---
+*.h5
+*.hdf5
+*.csv
+# 例外：requirements.txt 不受影響（.txt 本來就不在 ignore 中）
+
+# --- 廠商硬體資料夾（執行期產生）---
+Data_ID*/
+vendor_logs/
+archive/
+archive.zip
+
+# --- PyInstaller 打包產物 ---
+*.exe
+*.spec
+dist/
+build/
+
+# --- Windows 系統 ---
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
