@@ -210,6 +210,10 @@ __marimo__/
 # conformal-microgrid-rl 專案特有規則
 # ============================================================
 
+# --- 本機設定檔（含硬編路徑，不 commit）---
+config_gui.json
+# 使用 configs/config_gui.template.json 作為範本
+
 # --- 模型權重（體積大，另行管理）---
 *.pth
 *.pt

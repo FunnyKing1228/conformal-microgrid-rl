@@ -1,0 +1,37 @@
+{
+  "_comment": "複製此檔為 config_gui.json 並填入您的本機路徑（config_gui.json 已加入 .gitignore，不會被 commit）",
+  "vendor_dir": "C:/path/to/P302_AI_VX.X",
+  "vendor_exe": "C:/path/to/P302_AI_VX.X/P302.exe",
+  "model_path": "C:/path/to/models/best_sac_model.pth",
+  "initial_soc": 50.0,
+  "max_power_kw": 50.0,
+  "max_flow_percent": 100.0,
+  "collect_data": true,
+  "data_output_dir": "C:/path/to/Data_ID0",
+  "collect_interval_sec": 10,
+  "commands": [
+    {
+      "name": "電池 01",
+      "battery_id": "01",
+      "pmax_kw": 50.0,
+      "soc_min": 0.1,
+      "soc_max": 0.9,
+      "enabled": false
+    },
+    {
+      "name": "電池 02",
+      "battery_id": "02",
+      "pmax_kw": 50.0,
+      "soc_min": 0.1,
+      "soc_max": 0.9,
+      "enabled": false
+    }
+  ],
+  "ramp_kw": 2.0,
+  "price": 1.0,
+  "interval_sec": 1,
+  "max_age_sec": 180,
+  "device": "cpu",
+  "use_power_to_flow": true,
+  "use_safetynet": true
+}

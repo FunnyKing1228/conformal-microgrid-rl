@@ -1,0 +1,7 @@
+torch>=2.0.0
+numpy>=1.21.0
+matplotlib>=3.5.0
+PyYAML>=6.0
+gymnasium>=0.28.0
+python-microgrid>=0.3
+pyinstaller>=5.0 

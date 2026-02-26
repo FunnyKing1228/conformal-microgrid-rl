@@ -1,0 +1,103 @@
+{
+  "version": "1.0",
+  "description": "解析規則配置檔 - 可修改此檔案調整解析邏輯，無需重新打包",
+  
+  "data_file": {
+    "format": {
+      "has_timestamp_line": true,
+      "timestamp_format": "YYYYMMDDHHmmSS",
+      "mppt_line_index": 1,
+      "battery_line_start_index": 2
+    },
+    
+    "mppt_parsing": {
+      "enabled": true,
+      "line_format": "SolarV,SolarI,SolarP,MPPT_V,MPPT_I,MPPT_P,",
+      "field_count": 6,
+      "units": {
+        "solar_v": { "raw_unit": "0.01V", "multiplier": 0.01, "description": "太陽能板電壓 (V)" },
+        "solar_i": { "raw_unit": "1mA", "multiplier": 0.001, "description": "太陽能板電流 (A)" },
+        "solar_p": { "raw_unit": "1mW", "multiplier": 0.001, "description": "太陽能板功率 (W)" },
+        "mppt_v": { "raw_unit": "0.01V", "multiplier": 0.01, "description": "MPPT 電壓 (V)" },
+        "mppt_i": { "raw_unit": "1mA", "multiplier": 0.001, "description": "MPPT 電流 (A)" },
+        "mppt_p": { "raw_unit": "1mW", "multiplier": 0.001, "description": "MPPT 功率 (W)" }
+      },
+      "validation": {
+        "check_all_zero": false,
+        "max_solar_v": 1000.0,
+        "max_mppt_v": 1000.0,
+        "max_solar_p": 100000.0,
+        "max_mppt_p": 100000.0
+      }
+    },
+    
+    "battery_parsing": {
+      "line_format": "ID,SOC,BV,BI,Temp,Speed,",
+      "field_count": 6,
+      "units": {
+        "soc": { "raw_unit": "0.1%", "multiplier": 0.1, "description": "電池 SoC (%)" },
+        "bv": { "raw_unit": "0.01V", "multiplier": 0.01, "description": "電池電壓 (V)" },
+        "bi": { "raw_unit": "1mA", "multiplier": 0.001, "description": "電池電流 (A)" },
+        "temp": { "raw_unit": "0.1°C", "multiplier": 0.1, "description": "電池溫度 (°C)" },
+        "speed": { "raw_unit": "0.1%", "multiplier": 0.1, "description": "流速 (%)" }
+      },
+      "validation": {
+        "soc_range": [0.0, 100.0],
+        "bv_range": [0.0, 100.0],
+        "bi_range": [-1000.0, 1000.0],
+        "temp_range": [-50.0, 150.0],
+        "speed_range": [0.0, 100.0]
+      },
+      "special_ids": {
+        "test_id": "0",
+        "description": "ID=0 為測試模式，通常不參與控制"
+      }
+    }
+  },
+  
+  "command_file": {
+    "format": {
+      "has_timestamp_line": true,
+      "timestamp_format": "YYYYMMDDHHmmSS",
+      "command_line_format": "PP,功率(mW),流速,",
+      "field_count": 3
+    },
+    
+    "power_units": {
+      "input_unit": "W",
+      "output_unit": "mW",
+      "conversion": { "multiplier": 1000.0, "description": "輸入是 W，輸出是 mW" }
+    },
+    
+    "flow_units": {
+      "input_unit": "%",
+      "output_unit": "%",
+      "conversion": { "multiplier": 1.0, "description": "百分比，不補零" }
+    },
+    
+    "validation": {
+      "power_range": [0.0, 50000.0],
+      "flow_range": [0.0, 100.0]
+    }
+  },
+  
+  "logging": {
+    "enable_parse_logging": true,
+    "log_file": "parse_debug.log",
+    "log_level": "INFO",
+    "log_parsed_values": false,
+    "log_raw_values": false,
+    "description": "啟用解析日誌可幫助診斷問題，但會產生較多日誌檔案"
+  },
+  
+  "advanced": {
+    "max_file_age_seconds": 3600,
+    "file_encoding": "utf-8",
+    "retry_on_parse_error": true,
+    "skip_invalid_lines": true,
+    "description": "進階設定，一般不需要修改"
+  }
+}
+
+
+
