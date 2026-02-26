@@ -71,7 +71,20 @@ class MicrogridEnvironment(gym.Env):
         stress_bounds_drift_std: float = 0.0,
         stress_external_pmax_shrink_prob: float = 0.0,
         stress_external_pmax_shrink_factor: float = 1.0,
-        stress_power_loss_ratio: float = 0.0  # 功率損耗比例（0-1），充電時增加需求，放電時減少輸出
+        stress_power_loss_ratio: float = 0.0,  # 功率損耗比例（0-1），充電時增加需求，放電時減少輸出
+        # ── 擴充狀態空間選項 ──────────────────────────────────────────
+        use_extended_obs: bool = False,       # 啟用擴充狀態（含 SoH / flow_rate / 15min 統計）
+        initial_soh: float = 1.0,             # 初始電池健康狀態（0~1）
+        soh_degradation_per_kwh: float = 0.0, # 每 kWh 吞吐量的 SoH 衰減（預設不衰減）
+        initial_flow_rate_lpm: float = 0.0,  # 初始冷卻液流量 L/min（0 = 空冷/不監控）
+        # 外部注入的統計數列（對應 processed CSV 的窗格欄位）
+        # 若為 None，則環境自行從 pv_data / load_data 計算
+        dataset_pv_std_column: Optional[str] = None,
+        dataset_pv_max_column: Optional[str] = None,
+        dataset_load_std_column: Optional[str] = None,
+        dataset_load_max_column: Optional[str] = None,
+        dataset_soh_column: Optional[str] = None,
+        dataset_flow_rate_column: Optional[str] = None,
     ):
         super().__init__()
         
@@ -122,6 +135,26 @@ class MicrogridEnvironment(gym.Env):
         self.stress_external_pmax_shrink_prob = float(stress_external_pmax_shrink_prob)
         self.stress_external_pmax_shrink_factor = float(stress_external_pmax_shrink_factor)
         self.stress_power_loss_ratio = float(np.clip(stress_power_loss_ratio, 0.0, 0.3))  # 限制在0-30%
+        # ── 擴充狀態空間 ───────────────────────────────────────────────
+        self.use_extended_obs = bool(use_extended_obs)
+        self.current_soh = float(np.clip(initial_soh, 0.0, 1.0))
+        self._initial_soh = float(np.clip(initial_soh, 0.0, 1.0))
+        self.soh_degradation_per_kwh = float(soh_degradation_per_kwh)
+        self.current_flow_rate_lpm = float(initial_flow_rate_lpm)
+        self._initial_flow_rate_lpm = float(initial_flow_rate_lpm)
+        self.dataset_pv_std_column   = dataset_pv_std_column
+        self.dataset_pv_max_column   = dataset_pv_max_column
+        self.dataset_load_std_column = dataset_load_std_column
+        self.dataset_load_max_column = dataset_load_max_column
+        self.dataset_soh_column      = dataset_soh_column
+        self.dataset_flow_rate_column = dataset_flow_rate_column
+        # 統計時間序列（從 processed CSV 載入或即時計算）
+        self.pv_std_data  : Optional[np.ndarray] = None
+        self.pv_max_data  : Optional[np.ndarray] = None
+        self.load_std_data: Optional[np.ndarray] = None
+        self.load_max_data: Optional[np.ndarray] = None
+        self.soh_data     : Optional[np.ndarray] = None
+        self.flow_rate_data: Optional[np.ndarray] = None
         # Effective parameters for stress
         self.soc_min_eff = self.soc_min
         self.soc_max_eff = self.soc_max
@@ -287,9 +320,25 @@ class MicrogridEnvironment(gym.Env):
         except Exception:
             price = np.ones(N, dtype=float) * 0.15
         # Assign series
-        self.load_data = np.asarray(load, dtype=float)
-        self.pv_data = np.asarray(pv, dtype=float)
+        self.load_data  = np.asarray(load,  dtype=float)
+        self.pv_data    = np.asarray(pv,    dtype=float)
         self.price_data = np.asarray(price, dtype=float)
+
+        # ── 擴充統計欄位（若 CSV 有，則載入；否則保持 None → _setup_spaces 時補算）──
+        def _try_col(col_name_hint: Optional[str], fallback_cols: list) -> Optional[np.ndarray]:
+            """嘗試從 df 中讀取指定欄位，失敗則回傳 None"""
+            candidates = ([col_name_hint] if col_name_hint else []) + fallback_cols
+            for c in candidates:
+                if c and c in df.columns:
+                    return np.asarray(df[c].astype(float).fillna(0.0).values, dtype=float)
+            return None
+
+        self.pv_std_data   = _try_col(self.dataset_pv_std_column,   ['pv_std'])
+        self.pv_max_data   = _try_col(self.dataset_pv_max_column,   ['pv_max'])
+        self.load_std_data = _try_col(self.dataset_load_std_column, ['load_std'])
+        self.load_max_data = _try_col(self.dataset_load_max_column, ['load_max'])
+        self.soh_data      = _try_col(self.dataset_soh_column,      ['soh_mean', 'battery_soh'])
+        self.flow_rate_data= _try_col(self.dataset_flow_rate_column,['flow_rate_mean', 'flow_rate_lpm'])
     
     def _generate_synthetic_data(self):
         """生成合成數據 - 支持長期時間序列"""
@@ -504,14 +553,49 @@ class MicrogridEnvironment(gym.Env):
         return np.maximum(price_pattern, 0.05)
     
     def _setup_spaces(self):
-        """設置環境的狀態和動作空間"""
-        # State space: [SoC, load, pv, price, hour, day_of_week]
-        # SoC: 0-1, load: 0-100 kW, pv: 0-50 kW, price: 0-1 $/kWh, hour: 0-23, day: 0-6
-        self.observation_space = spaces.Box(
-            low=np.array([0.0, 0.0, 0.0, 0.0, 0, 0]),
-            high=np.array([1.0, 100.0, 50.0, 1.0, 23, 6]),
-            dtype=np.float32
-        )
+        """設置環境的狀態和動作空間
+        
+        標準模式（use_extended_obs=False）── 6 維：
+          [SoC, load_mean, pv_mean, price_norm, hour, day_of_week]
+
+        擴充模式（use_extended_obs=True）── 14 維：
+          [SoC, SoH, flow_rate_norm,
+           pv_mean, pv_std, pv_max,
+           load_mean, load_std, load_max,
+           price_norm, hour, day_of_week,
+           energy_pv_kwh_norm, energy_load_kwh_norm]
+        """
+        if self.use_extended_obs:
+            # 擴充 14 維觀測空間
+            # 索引：0=SoC, 1=SoH, 2=flow_norm,
+            #        3=pv_mean, 4=pv_std, 5=pv_max,
+            #        6=load_mean, 7=load_std, 8=load_max,
+            #        9=price_norm, 10=hour, 11=dow,
+            #        12=energy_pv_norm, 13=energy_load_norm
+            pw = self.battery_power_kw * 2  # 合理上限
+            self.observation_space = spaces.Box(
+                low=np.array([
+                    0.0, 0.0, 0.0,           # SoC, SoH, flow_norm
+                    0.0, 0.0, 0.0,           # pv_mean, pv_std, pv_max
+                    0.0, 0.0, 0.0,           # load_mean, load_std, load_max
+                    0.0, 0.0, 0.0,           # price_norm, hour, dow
+                    0.0, 0.0,                # energy_pv_norm, energy_load_norm
+                ], dtype=np.float32),
+                high=np.array([
+                    1.0,  1.0,  1.0,         # SoC, SoH, flow_norm
+                    pw,   pw,   pw,           # pv_mean, pv_std, pv_max
+                    pw,   pw,   pw,           # load_mean, load_std, load_max
+                    1.0,  23.0, 6.0,          # price_norm, hour, dow
+                    1.0,  1.0,               # energy_pv_norm, energy_load_norm (正規化後 0~1)
+                ], dtype=np.float32)
+            )
+        else:
+            # 標準 6 維
+            self.observation_space = spaces.Box(
+                low=np.array([0.0, 0.0, 0.0, 0.0, 0, 0], dtype=np.float32),
+                high=np.array([1.0, 100.0, 50.0, 1.0, 23, 6], dtype=np.float32),
+                dtype=np.float32
+            )
         
         # Action space: continuous battery power [-battery_power_kw, +battery_power_kw]
         self.action_space = spaces.Box(
@@ -521,34 +605,97 @@ class MicrogridEnvironment(gym.Env):
         )
     
     def _get_state(self) -> np.ndarray:
-        """獲取當前狀態"""
+        """獲取當前狀態（6 維標準 / 14 維擴充，由 use_extended_obs 決定）"""
+        step = self.current_step
+
+        # ── 基本數值 ──────────────────────────────────────────────────
         if self.microgrid is not None and self.episode_data is not None:
-            # Use real data
-            current_hour = self.current_step % 24
-            current_day = (self.current_step // 24) % 7
-            
-            load = self.episode_data['load'][self.current_step] if self.current_step < len(self.episode_data['load']) else 0.0
-            pv = self.episode_data['pv'][self.current_step] if self.current_step < len(self.episode_data['pv']) else 0.0
-            price = self.episode_data['price'][self.current_step] if self.current_step < len(self.episode_data['price']) else 0.15
+            load  = float(self.episode_data['load'][step])  if step < len(self.episode_data['load'])  else 0.0
+            pv    = float(self.episode_data['pv'][step])    if step < len(self.episode_data['pv'])    else 0.0
+            price = float(self.episode_data['price'][step]) if step < len(self.episode_data['price']) else 0.15
         else:
-            # Use synthetic data
-            current_hour = self.current_step % 24
-            current_day = (self.current_step // 24) % 7
-            
-            load = self.load_data[current_hour] if hasattr(self, 'load_data') else 30.0
-            pv = self.pv_data[current_hour] if hasattr(self, 'pv_data') else 20.0
-            price = self.price_data[current_hour] if hasattr(self, 'price_data') else 0.15
-        
-        # Normalize price to 0-1 range
-        price_normalized = np.clip(price / 0.5, 0.0, 1.0)  # Assuming max price is 0.5 $/kWh
-        
+            h     = step % 24
+            load  = float(self.load_data[h])  if hasattr(self, 'load_data')  and self.load_data  is not None else 30.0
+            pv    = float(self.pv_data[h])    if hasattr(self, 'pv_data')    and self.pv_data    is not None else 20.0
+            price = float(self.price_data[h]) if hasattr(self, 'price_data') and self.price_data is not None else 0.15
+
+        # SoC 觀測（含延遲 / 雜訊壓力測試）
+        if self.stress_enable and self.stress_soc_obs_delay > 0 and len(self._soc_obs_buffer) > 0:
+            soc_obs = float(self._soc_obs_buffer[0])
+        else:
+            soc_obs = float(self.current_soc)
+        if self.stress_enable and self.stress_soc_obs_noise_std > 0.0:
+            soc_obs += float(np.random.randn()) * self.stress_soc_obs_noise_std
+            soc_obs = float(np.clip(soc_obs, 0.0, 1.0))
+
+        # 時間 context
+        steps_per_hour = max(1, int(round(1.0 / max(self.time_step, 1e-9)))) if self.time_step < 1.0 else 1
+        current_hour = int((step // steps_per_hour) % 24)
+        current_day  = int((step // (steps_per_hour * 24)) % 7)
+
+        price_norm = float(np.clip(price / 0.5, 0.0, 1.0))
+
+        # ── 標準 6 維 ─────────────────────────────────────────────────
+        if not self.use_extended_obs:
+            return np.array([
+                soc_obs,        # SoC
+                load,           # 負載 kW
+                pv,             # PV kW
+                price_norm,     # 電價（正規化）
+                current_hour,   # 小時
+                current_day,    # 星期
+            ], dtype=np.float32)
+
+        # ── 擴充 14 維 ────────────────────────────────────────────────
+        # PV 統計
+        ep_pv_std  = self.episode_data.get('pv_std',  None) if self.episode_data else None
+        ep_pv_max  = self.episode_data.get('pv_max',  None) if self.episode_data else None
+        ep_ld_std  = self.episode_data.get('load_std',None) if self.episode_data else None
+        ep_ld_max  = self.episode_data.get('load_max',None) if self.episode_data else None
+
+        pv_std  = float(ep_pv_std[step])  if ep_pv_std  is not None and step < len(ep_pv_std)  else float(pv * 0.15)
+        pv_max  = float(ep_pv_max[step])  if ep_pv_max  is not None and step < len(ep_pv_max)  else float(pv * 1.20)
+        ld_std  = float(ep_ld_std[step])  if ep_ld_std  is not None and step < len(ep_ld_std)  else float(load * 0.10)
+        ld_max  = float(ep_ld_max[step])  if ep_ld_max  is not None and step < len(ep_ld_max)  else float(load * 1.15)
+
+        # SoH（可從時間序列讀取，或用動態衰減值）
+        ep_soh = self.episode_data.get('soh', None) if self.episode_data else None
+        if ep_soh is not None and step < len(ep_soh):
+            soh_obs = float(ep_soh[step])
+        else:
+            soh_obs = float(np.clip(self.current_soh, 0.0, 1.0))
+
+        # Flow rate（正規化到 0~1，假設最大 20 L/min）
+        ep_flow = self.episode_data.get('flow_rate', None) if self.episode_data else None
+        if ep_flow is not None and step < len(ep_flow):
+            flow_raw = float(ep_flow[step])
+        else:
+            flow_raw = float(self.current_flow_rate_lpm)
+        flow_norm = float(np.clip(flow_raw / 20.0, 0.0, 1.0))
+
+        # 15 分鐘窗格能量（正規化）：kWh / 最大電池容量
+        dt_h = float(self.time_step)  # 步長（小時）
+        energy_pv_kwh   = pv   * dt_h
+        energy_load_kwh = load * dt_h
+        cap = max(self.battery_capacity_kwh, 1e-6)
+        energy_pv_norm   = float(np.clip(energy_pv_kwh   / cap, 0.0, 1.0))
+        energy_load_norm = float(np.clip(energy_load_kwh / cap, 0.0, 1.0))
+
         return np.array([
-            self.current_soc,           # Battery SoC
-            load,                       # Current load
-            pv,                         # Current PV generation
-            price_normalized,           # Normalized price
-            current_hour,               # Hour of day
-            current_day                 # Day of week
+            soc_obs,          # 0  SoC
+            soh_obs,          # 1  SoH（電池健康）
+            flow_norm,        # 2  冷卻液流量（正規化）
+            pv,               # 3  PV 平均 kW
+            pv_std,           # 4  PV 波動性
+            pv_max,           # 5  PV 峰值
+            load,             # 6  負載平均 kW
+            ld_std,           # 7  負載波動性
+            ld_max,           # 8  負載峰值
+            price_norm,       # 9  電價（正規化）
+            float(current_hour),  # 10 小時
+            float(current_day),   # 11 星期
+            energy_pv_norm,   # 12 PV 能量（正規化）
+            energy_load_norm, # 13 負載能量（正規化）
         ], dtype=np.float32)
     
     def _update_battery_soc(self, action: float) -> float:
@@ -910,6 +1057,8 @@ class MicrogridEnvironment(gym.Env):
         # 先預設為 0，待資料準備好後再覆寫
         self.current_step = 0
         self.current_soc = 0.5  # Start at 50% SoC
+        self.current_soh = float(self._initial_soh)   # 每回合重置 SoH
+        self.current_flow_rate_lpm = float(self._initial_flow_rate_lpm)
         self.total_revenue = 0.0
         self.total_cost = 0.0
         self.soc_violations = 0
@@ -935,9 +1084,9 @@ class MicrogridEnvironment(gym.Env):
         if self.microgrid is not None and self.use_real_data and self.load_data is not None:
             # Use real microgrid data
             self.episode_data = {
-                'load': self.load_data[:self.episode_length],
-                'pv': self.pv_data[:self.episode_length],
-                'price': self.price_data[:self.episode_length]
+                'load' : self.load_data[:self.episode_length],
+                'pv'   : self.pv_data[:self.episode_length],
+                'price': self.price_data[:self.episode_length],
             }
         else:
             # Use synthetic data
@@ -945,10 +1094,23 @@ class MicrogridEnvironment(gym.Env):
                 self._generate_synthetic_data()
             
             self.episode_data = {
-                'load': self.load_data[:self.episode_length] if self.load_data is not None else np.ones(self.episode_length) * 30.0,
-                'pv': self.pv_data[:self.episode_length] if self.pv_data is not None else np.ones(self.episode_length) * 20.0,
-                'price': self.price_data[:self.episode_length] if self.price_data is not None else np.ones(self.episode_length) * 0.15
+                'load' : self.load_data[:self.episode_length]  if self.load_data  is not None else np.ones(self.episode_length) * 30.0,
+                'pv'   : self.pv_data[:self.episode_length]    if self.pv_data    is not None else np.ones(self.episode_length) * 20.0,
+                'price': self.price_data[:self.episode_length] if self.price_data is not None else np.ones(self.episode_length) * 0.15,
             }
+        
+        # 擴充統計欄位（use_extended_obs 模式）
+        if self.use_extended_obs:
+            n = self.episode_length
+            pv_arr   = self.episode_data['pv']
+            load_arr = self.episode_data['load']
+            # 若有外部統計列，取用；否則以 ±15% 估算
+            self.episode_data['pv_std']   = self.pv_std_data[:n]   if self.pv_std_data   is not None else pv_arr   * 0.15
+            self.episode_data['pv_max']   = self.pv_max_data[:n]   if self.pv_max_data   is not None else pv_arr   * 1.20
+            self.episode_data['load_std'] = self.load_std_data[:n] if self.load_std_data is not None else load_arr * 0.10
+            self.episode_data['load_max'] = self.load_max_data[:n] if self.load_max_data is not None else load_arr * 1.15
+            self.episode_data['soh']      = self.soh_data[:n]      if self.soh_data      is not None else np.full(n, self._initial_soh)
+            self.episode_data['flow_rate']= self.flow_rate_data[:n]if self.flow_rate_data is not None else np.full(n, self._initial_flow_rate_lpm)
         
         # 隨機/固定起點抽樣：在資料已備妥時，從 [0, len-episode_length] 抽樣起點
         try:
@@ -964,12 +1126,17 @@ class MicrogridEnvironment(gym.Env):
                     else:
                         max_start = max_start_global
                     start_idx = int(np.random.randint(0, max_start + 1))
-                # 重新切片本回合視窗
-                self.episode_data = {
-                    'load': self.episode_data['load'][start_idx:start_idx + self.episode_length],
-                    'pv': self.episode_data['pv'][start_idx:start_idx + self.episode_length],
-                    'price': self.episode_data['price'][start_idx:start_idx + self.episode_length],
+                # 重新切片本回合視窗（包含擴充統計欄位）
+                sl = slice(start_idx, start_idx + self.episode_length)
+                new_ep: dict = {
+                    'load' : self.episode_data['load'][sl],
+                    'pv'   : self.episode_data['pv'][sl],
+                    'price': self.episode_data['price'][sl],
                 }
+                for _k in ('pv_std', 'pv_max', 'load_std', 'load_max', 'soh', 'flow_rate'):
+                    if _k in self.episode_data:
+                        new_ep[_k] = self.episode_data[_k][sl]
+                self.episode_data = new_ep
                 self.current_step = 0
         except Exception:
             # 若失敗，維持從 0 開始
@@ -1087,6 +1254,14 @@ class MicrogridEnvironment(gym.Env):
 
         self.current_soc = self._update_battery_soc(applied_action_kw)
         self._prev_exec_action_kw = applied_action_kw
+
+        # ── SoH 衰減（每步根據吞吐量計算）──────────────────────────
+        if self.soh_degradation_per_kwh > 0.0:
+            throughput_kwh = abs(applied_action_kw) * float(self._effective_time_step)
+            self.current_soh = float(np.clip(
+                self.current_soh - self.soh_degradation_per_kwh * throughput_kwh,
+                0.0, 1.0
+            ))
         
         # SoC 違規累計已在 _update_battery_soc 中處理，這裡不再重複加計
         
@@ -1136,6 +1311,8 @@ class MicrogridEnvironment(gym.Env):
             'soc_violations': self.soc_violations,
             'action_violations': self.action_violations,
             'current_soc': self.current_soc,
+            'current_soh': self.current_soh,
+            'flow_rate_lpm': self.current_flow_rate_lpm,
             'net_load': net_load,
             'price': price,
             'step': self.current_step,
