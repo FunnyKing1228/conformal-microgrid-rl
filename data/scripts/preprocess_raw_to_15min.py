@@ -56,10 +56,19 @@ def load_raw_csv(path: str) -> pd.DataFrame:
     else:
         raise ValueError("找不到時間欄位（timestamp / time / datetime）")
 
-    # PV 欄位容錯
-    for col in ['solar_p_kw', 'solar_p_mw', 'mppt_p_kw', 'mppt_p_mw', 'pv_kw', 'Solar']:
+    # PV 欄位容錯（優先 MPPT，比 raw solar 穩定 ~67 倍）
+    # 命名慣例：沒寫 m → 基本單位(V/W/kW)，有寫 m(_mw/_ma) → milli
+    # 轉 kW：mW × 1e-6, W × 1e-3, kW × 1
+    _pv_candidates = [
+        ('mppt_p_kw', 1.0),   # MPPT 優先（kW）
+        ('mppt_p_mw', 1e-6),  # MPPT (mW → kW)
+        ('solar_p_kw', 1.0),  # fallback: raw solar (kW)
+        ('pv_kw', 1.0),       # 通用欄名
+        ('Solar', 1.0),       # 已處理的別名
+        ('solar_p_mw', 1e-6), # raw solar (mW → kW)
+    ]
+    for col, scale in _pv_candidates:
         if col in df.columns:
-            scale = 1000.0 if 'mw' in col.lower() else 1.0
             df['pv_kw'] = df[col].astype(float).fillna(0.0) * scale
             break
     else:

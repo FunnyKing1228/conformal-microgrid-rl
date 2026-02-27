@@ -1,5 +1,6 @@
 import sys
 import os
+import csv
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..', 'src', 'safe_fl_microgrid'))
 
 import yaml
@@ -16,6 +17,32 @@ import time
 from typing import List, Dict, Any
 import argparse
 from safety_net import project as safety_project, update_conformal_residual, set_conformal_params, clear_residual_buffer, get_residual_count
+
+
+# ══════════════════════════════════════════════════════════════════
+# Per-episode CSV Logger（即時追蹤，低開銷）
+# ══════════════════════════════════════════════════════════════════
+class EpisodeCSVLogger:
+    """每 episode 寫一行 CSV，方便即時監控。"""
+
+    HEADER = [
+        'episode', 'wall_sec', 'ep_reward', 'ep_length',
+        'soc_min', 'soc_max', 'soc_mean', 'soc_end',
+        'violations_realized', 'violations_attempted', 'safety_projected',
+        'action_mean_abs', 'action_raw_mean', 'action_safe_mean',
+        'revenue', 'cost', 'net_profit',
+        'buffer_size', 'conformal_delta', 'proj_penalty_mult',
+        'alpha',
+    ]
+
+    def __init__(self, path: str):
+        self.path = path
+        with open(path, 'w', newline='', encoding='utf-8-sig') as f:
+            csv.writer(f).writerow(self.HEADER)
+
+    def log(self, row: Dict[str, Any]):
+        with open(self.path, 'a', newline='', encoding='utf-8-sig') as f:
+            csv.writer(f).writerow([row.get(k, '') for k in self.HEADER])
 
 
 def load_config(config_path: str) -> Dict[str, Any]:
@@ -106,6 +133,18 @@ def create_environment(config: Dict[str, Any]) -> MicrogridEnvironment:
         synthetic_price_peak_start=env_config.get('synthetic_price_peak_start', 8),
         synthetic_price_peak_end=env_config.get('synthetic_price_peak_end', 18),
         allow_grid_trading=env_config.get('allow_grid_trading', True),  # 預設允許電網交易
+        # ── Flow Rate 電化學等效模型參數 ──────────────────────────
+        use_flow_rate_action=env_config.get('use_flow_rate_action', False),
+        flow_R_base_ohm=env_config.get('flow_R_base_ohm', 72.5),
+        flow_P_max_pump_W=env_config.get('flow_P_max_pump_W', 0.0168),
+        flow_k_R=env_config.get('flow_k_R', 0.5),
+        flow_V_OCV_charge=env_config.get('flow_V_OCV_charge', 8.5),
+        flow_V_OCV_discharge=env_config.get('flow_V_OCV_discharge', 5.6),
+        flow_I_rated_A=env_config.get('flow_I_rated_A', 0.020),
+        # ── 電池效率 ──────────────────────────────────────────
+        battery_efficiency=env_config.get('battery_efficiency', 0.95),
+        # ── 擴充觀察空間 ─────────────────────────────────────
+        use_extended_obs=env_config.get('use_extended_obs', False),
         **stress_kwargs
     )
     # 將 SafetyNet 的 ramp 參數掛在 env 上，供訓練與評估共用
@@ -186,15 +225,29 @@ def train_sac_with_microgrid(
     current_conformal_delta = float(conformal_cfg.get('delta', 0.1))
     projected_penalty_mult = 1.0
     
-    print(f"Starting SAC training with Microgrid Environment for {total_episodes} episodes...")
-    print(f"Device: {agent.device}")
-    print(f"Update every: {update_every} steps")
-    print(f"Evaluation every: {eval_every} episodes")
-    print(f"Warmup steps: {warmup_steps}")
-    print(f"Experiment directory: {exp_manager.experiment_dir}")
-    print(f"Environment: {env.__class__.__name__}")
-    print(f"State space: {env.observation_space}")
-    print(f"Action space: {env.action_space}")
+    # ── Per-episode CSV logger ─────────────────────────────────
+    csv_log_path = os.path.join(exp_manager.logs_dir, "episode_log.csv")
+    csv_logger = EpisodeCSVLogger(csv_log_path)
+    train_start_wall = time.time()
+
+    print(f"\n{'='*70}")
+    print(f"  SAC Training — P302 Microgrid Simulation")
+    print(f"{'='*70}")
+    print(f"  Episodes      : {total_episodes}")
+    print(f"  Steps/episode : {max_steps}")
+    print(f"  Total steps   : {total_episodes * max_steps:,}")
+    print(f"  Variant       : {variant}")
+    print(f"  SafetyNet     : {'ON' if use_safetynet else 'OFF'}")
+    print(f"  Device        : {agent.device}")
+    print(f"  Warmup        : {warmup_steps} steps")
+    print(f"  Eval every    : {eval_every} episodes ({eval_episodes} eps each)")
+    print(f"  Log every     : {log_interval} episodes")
+    print(f"  Save every    : {save_every} episodes")
+    print(f"  Experiment    : {exp_manager.experiment_dir}")
+    print(f"  CSV log       : {csv_log_path}")
+    print(f"  State dim     : {env.observation_space.shape[0]}")
+    print(f"  Action dim    : {env.action_space.shape[0]}")
+    print(f"{'='*70}\n")
     
     for episode in range(total_episodes):
         state, info = env.reset()
@@ -217,14 +270,26 @@ def train_sac_with_microgrid(
         prev_soc_violations_cum = 0
         prev_action_violations_cum = 0
 
+        # 判斷是否使用 2D 動作空間（power + flow_rate）
+        use_flow = bool(getattr(env, 'use_flow_rate_action', False))
+        action_dim = 2 if use_flow else 1
+
         for step in range(max_steps):
             # Select action
-            action_norm = agent.select_action(state, evaluate=False)  # [-1, 1]
-            action_norm_val = float(action_norm[0])
+            action_norm = agent.select_action(state, evaluate=False)  # [-1, 1]^action_dim
+            action_norm_val = float(action_norm[0])  # power 分量
             actions.append(action_norm_val)
             actions_raw.append(action_norm_val)
             power_scale = float(getattr(env, 'battery_power_kw', 1.0))
             a_raw_kw = action_norm_val * power_scale
+
+            # 解碼 flow_fraction（若 2D）：[-1,1] → [0.01, 1.0]
+            if use_flow and len(action_norm) >= 2:
+                flow_norm_raw = float(action_norm[1])
+                flow_fraction = float(np.clip((flow_norm_raw + 1.0) * 0.495 + 0.01, 0.01, 1.0))
+            else:
+                flow_norm_raw = 0.0
+                flow_fraction = 0.5  # 預設 50%
             
             # 影子模式：以Raw動作估計下一步SoC，判斷是否「嘗試違規」（不影響控制）
             try:
@@ -237,7 +302,7 @@ def train_sac_with_microgrid(
                 attempted = 0
             attempted_count += attempted
 
-            # SafetyNet 投影：僅在 use_safetynet=True 時啟用；純 SAC 直接用 raw 動作
+            # SafetyNet 投影：僅投影 power 分量；flow_fraction 不投影
             pmax = power_scale
             if use_safetynet:
                 ramp_kw = getattr(env, 'safetynet_ramp_kw', None)
@@ -277,8 +342,12 @@ def train_sac_with_microgrid(
             except Exception:
                 soc_pred_next = None
 
-            # Take action
-            next_state, reward, terminated, truncated, step_info = env.step([a_safe_kw])
+            # Take action（2D 模式傳 [power_kw, flow_fraction]，1D 模式傳 [power_kw]）
+            if use_flow:
+                env_action = [a_safe_kw, flow_fraction]
+            else:
+                env_action = [a_safe_kw]
+            next_state, reward, terminated, truncated, step_info = env.step(env_action)
             # Apply safety shaping only for SafetyNet variants, and scale consistently with env reward
             # Note: env reward already multiplied by reward_scaling; we scale penalties by the same factor
             scale_guard = max(float(getattr(env, 'reward_scaling', 1.0)), 1e-9)
@@ -292,8 +361,14 @@ def train_sac_with_microgrid(
             done = terminated or truncated
             
             # Store transition（帶入 OCC 代理成本 Δa/Pmax）
+            # 2D 動作：[power_safe_norm, flow_norm_raw]；1D：[power_safe_norm]
             occ_proxy = float(delta_kw) / max(pmax, 1e-9)
-            agent.store_transition(state, np.array([a_safe_norm], dtype=np.float32), reward, next_state, done, occ_proxy=occ_proxy)
+            if use_flow:
+                # 反映 flow 的 safe norm（flow 不經投影，直接保留原始 norm）
+                action_to_store = np.array([a_safe_norm, flow_norm_raw], dtype=np.float32)
+            else:
+                action_to_store = np.array([a_safe_norm], dtype=np.float32)
+            agent.store_transition(state, action_to_store, reward, next_state, done, occ_proxy=occ_proxy)
             
             # Update networks (only after warmup)
             if (step % update_every == 0 and 
@@ -353,6 +428,37 @@ def train_sac_with_microgrid(
         episode_safety_projected.append(projected_count)
         episode_realized_violations.append(realized_count)
         
+        # ── Per-episode CSV log（低開銷：每集一行）──────────────────
+        soc_arr = np.array(soc_trajectory)
+        ep_wall = time.time() - train_start_wall
+        try:
+            current_alpha = float(agent.log_alpha.exp().item()) if hasattr(agent, 'log_alpha') else 0.0
+        except Exception:
+            current_alpha = 0.0
+        csv_logger.log({
+            'episode': episode,
+            'wall_sec': f'{ep_wall:.1f}',
+            'ep_reward': f'{episode_reward:.4f}',
+            'ep_length': episode_length,
+            'soc_min': f'{soc_arr.min():.4f}',
+            'soc_max': f'{soc_arr.max():.4f}',
+            'soc_mean': f'{soc_arr.mean():.4f}',
+            'soc_end': f'{soc_arr[-1]:.4f}',
+            'violations_realized': realized_count,
+            'violations_attempted': attempted_count,
+            'safety_projected': projected_count,
+            'action_mean_abs': f'{np.mean(np.abs(actions)):.4f}',
+            'action_raw_mean': f'{np.mean(np.abs(actions_raw)):.4f}' if actions_raw else '0',
+            'action_safe_mean': f'{np.mean(np.abs(actions_safe)):.4f}' if actions_safe else '0',
+            'revenue': f'{episode_revenue:.4f}',
+            'cost': f'{episode_cost:.4f}',
+            'net_profit': f'{episode_revenue - episode_cost:.4f}',
+            'buffer_size': len(agent.replay_buffer),
+            'conformal_delta': f'{current_conformal_delta:.4f}',
+            'proj_penalty_mult': f'{projected_penalty_mult:.3f}',
+            'alpha': f'{current_alpha:.4f}',
+        })
+
         # 自適應調整：根據本集 realized 調整 conformal delta 與投影懲罰倍率
         try:
             target_low, target_high = 5, 10
@@ -380,13 +486,11 @@ def train_sac_with_microgrid(
             eval_revenues.append(eval_revenue)
             eval_costs.append(eval_cost)
             
-            print(f"Episode {episode:4d} | "
-                  f"Train Reward: {episode_reward:6.2f} | "
-                  f"Eval Reward: {eval_reward:6.2f} | "
-                  f"Eval Violations: {eval_violations:2d} | "
-                  f"Eval Revenue: ${eval_revenue:5.2f} | "
-                  f"Eval Cost: ${eval_cost:5.2f} | "
-                  f"Buffer Size: {len(agent.replay_buffer)}")
+            is_best = "★ BEST" if eval_reward > best_eval_reward else ""
+            print(f"   [EVAL] Ep {episode:4d} | "
+                  f"Eval={eval_reward:8.2f} (Train={episode_reward:8.2f}) | "
+                  f"Violations={eval_violations:3d} | "
+                  f"Rev=${eval_revenue:.4f} Cost=${eval_cost:.4f} {is_best}")
             
             # Save best model
             if eval_reward > best_eval_reward:
@@ -402,17 +506,32 @@ def train_sac_with_microgrid(
             checkpoint_path = os.path.join(exp_manager.models_dir, f"sac_checkpoint_ep{episode}.pth")
             agent.save(checkpoint_path)
         
-        # Progress logging
+        # Progress logging — 每 log_interval 集印一次摘要
         if episode % log_interval == 0:
-            avg_reward = np.mean(episode_rewards[-log_interval:])
-            avg_violations = np.mean(episode_soc_violations[-log_interval:])
-            avg_revenue = np.mean(episode_revenues[-log_interval:])
-            avg_cost = np.mean(episode_costs[-log_interval:])
-            print(f"Episode {episode:4d} | "
-                  f"Avg Reward (last {log_interval}): {avg_reward:6.2f} | "
-                  f"Avg Violations: {avg_violations:4.2f} | "
-                  f"Avg Revenue: ${avg_revenue:5.2f} | "
-                  f"Avg Cost: ${avg_cost:5.2f}")
+            n_back = min(log_interval, len(episode_rewards))
+            avg_reward = np.mean(episode_rewards[-n_back:])
+            avg_violations = np.mean(episode_soc_violations[-n_back:])
+            avg_revenue = np.mean(episode_revenues[-n_back:])
+            avg_cost = np.mean(episode_costs[-n_back:])
+            avg_attempted = np.mean(episode_attempted_violations[-n_back:])
+            avg_projected = np.mean(episode_safety_projected[-n_back:])
+            avg_realized = np.mean(episode_realized_violations[-n_back:])
+            # SoC 統計（最近一集）
+            soc_last = np.array(soc_trajectory)
+            # 時間 & ETA
+            elapsed = time.time() - train_start_wall
+            eps_per_sec = max(episode + 1, 1) / max(elapsed, 1)
+            eta_sec = (total_episodes - episode - 1) / max(eps_per_sec, 1e-9)
+            pct = (episode + 1) / total_episodes * 100
+
+            print(f"\n── Ep {episode:4d}/{total_episodes} ({pct:5.1f}%) "
+                  f"| {elapsed/60:.1f}min elapsed | ETA {eta_sec/60:.1f}min ──")
+            print(f"   Reward(avg{n_back})={avg_reward:8.2f}  "
+                  f"Violations: att={avg_attempted:.1f} proj={avg_projected:.1f} real={avg_realized:.1f}")
+            print(f"   SoC[last]: {soc_last.min():.3f}~{soc_last.max():.3f} "
+                  f"(mean={soc_last.mean():.3f}, end={soc_last[-1]:.3f})")
+            print(f"   Revenue=${avg_revenue:.4f}  Cost=${avg_cost:.4f}  "
+                  f"Net=${avg_revenue-avg_cost:.4f}  Buffer={len(agent.replay_buffer)}")
     
     # Save final model
     if logging_config['save_models']:
@@ -485,10 +604,16 @@ def evaluate_microgrid_agent(agent: SACAgent, env: MicrogridEnvironment, n_episo
         prev_soc_violations_cum = 0
         prev_a_eval = 0.0
         
+        use_flow_eval = bool(getattr(env, 'use_flow_rate_action', False))
         for step in range(int(n_steps)):
-            action = agent.select_action(state, evaluate=True)  # [-1, 1]
+            action = agent.select_action(state, evaluate=True)  # [-1, 1]^action_dim
             pmax = float(getattr(env, 'battery_power_kw', 0.0))
             a_raw_kw = float(action[0]) * pmax
+            # 解碼 flow_fraction
+            if use_flow_eval and len(action) >= 2:
+                flow_fraction_eval = float(np.clip((float(action[1]) + 1.0) * 0.495 + 0.01, 0.01, 1.0))
+            else:
+                flow_fraction_eval = 0.5
             if use_safetynet:
                 ramp_kw = getattr(env, 'safetynet_ramp_kw', None)
                 soc_bounds = (float(getattr(env, 'soc_min', 0.0)), float(getattr(env, 'soc_max', 1.0)))
@@ -506,12 +631,14 @@ def evaluate_microgrid_agent(agent: SACAgent, env: MicrogridEnvironment, n_episo
                 if hasattr(env, 'hard_guard') and not bool(getattr(env, 'hard_guard')):
                     setattr(env, 'hard_guard', True)
                     need_reset = True
-                next_state, reward, terminated, truncated, info = env.step([a_safe_kw])
+                env_action_eval = [a_safe_kw, flow_fraction_eval] if use_flow_eval else [a_safe_kw]
+                next_state, reward, terminated, truncated, info = env.step(env_action_eval)
                 if need_reset:
                     setattr(env, 'hard_guard', False)
                 prev_a_eval = a_safe_kw
             else:
-                next_state, reward, terminated, truncated, info = env.step([a_raw_kw])
+                env_action_eval = [a_raw_kw, flow_fraction_eval] if use_flow_eval else [a_raw_kw]
+                next_state, reward, terminated, truncated, info = env.step(env_action_eval)
             done = terminated or truncated
             
             episode_reward += reward
@@ -773,11 +900,14 @@ def main():
     metrics = train_sac_with_microgrid(env, agent, config, exp_manager)
     training_time = time.time() - start_time
     
-    print(f"\nTraining completed in {training_time:.2f} seconds")
+    print(f"\n{'='*70}")
+    print(f"  Training completed in {training_time/60:.1f} min ({training_time:.0f} sec)")
+    print(f"{'='*70}")
     if metrics['eval_rewards']:
-        print(f"Final evaluation reward: {metrics['eval_rewards'][-1]:.2f}")
-    print(f"Average SoC violations: {np.mean(metrics['episode_soc_violations']):.2f}")
-    print(f"Average action violations: {np.mean(metrics['episode_action_violations']):.2f}")
+        print(f"  Final eval reward : {metrics['eval_rewards'][-1]:.4f}")
+        print(f"  Best eval reward  : {max(metrics['eval_rewards']):.4f}")
+    print(f"  Avg SoC violations: {np.mean(metrics['episode_soc_violations']):.2f}")
+    print(f"  Avg action viol.  : {np.mean(metrics['episode_action_violations']):.2f}")
     
     # Collect compute resources information
     compute_res = collect_compute_resources(agent, device, training_time)

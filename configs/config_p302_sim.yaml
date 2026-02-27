@@ -1,0 +1,115 @@
+# ═══════════════════════════════════════════════════════════════════
+# P302 SLFB 鋅空氣電池 ── 正式模擬訓練配置
+# 架構: SAC + SafetyNet + Conformal Risk Tube + OCC + Adaptive Loop
+# 下週 deploy 到實體硬體
+# ═══════════════════════════════════════════════════════════════════
+
+random_seed: 42
+
+device: "auto"   # auto / cpu / cuda
+
+# ── 環境參數（與 P302 實體規格一致）────────────────────────────────
+env:
+  microgrid_id: 0
+  # 576 步 = 6天 × 96步/天（15分鐘一步），與 training CSV 筆數一致
+  episode_length: 576
+  time_step: 0.25               # 15分鐘 = 0.25小時
+
+  # P302 SLFB 電池規格
+  # 10 mAh @ ~7V nominal ≈ 0.07 Wh = 0.00007 kWh
+  battery_capacity_kwh: 0.00007
+  # 最大功率 20mA × 8.5V = 170mW ≈ 0.00017 kW
+  battery_power_kw: 0.00017
+  battery_efficiency: 0.85       # 鋅空氣電池效率較低
+
+  use_real_data: true
+  # 使用處理好的 6 天 15 分鐘 CSV（相對於 core/ 目錄）
+  dataset_csv_path: "../data/processed/training_7day_15min.csv"
+  dataset_pv_join_wind: false
+
+  # CSV 欄位映射
+  dataset_time_column: "timestamp"
+
+  # P302 有市電接入（scenario 1~4 包含 grid）
+  allow_grid_trading: true
+
+  # SafetyNet 的 ramp 設定
+  ramp_limit_kw: null            # 先不限 ramp（電池功率已很小）
+  hard_guard: false
+
+  # ── Flow Rate 電化學等效模型（SLFB 鋅空氣電池）────────────────────
+  # 啟用 2D action space: [power_kw, flow_fraction]
+  use_flow_rate_action: true
+  # 基線內阻 R_base = (V_charge - V_discharge) / (2 × I_rated)
+  # = (8.5 - 5.6) / (2 × 0.02) = 72.5 Ω
+  flow_R_base_ohm: 72.5
+  # 幫浦最大寄生功率 ≈ 16.8 mW = 0.0168 W
+  flow_P_max_pump_W: 0.0168
+  # 內阻增幅因子（低流速 → 濃度極化 → 內阻飆升）
+  flow_k_R: 0.5
+  # 開路電壓
+  flow_V_OCV_charge: 8.5
+  flow_V_OCV_discharge: 5.6
+  # 額定電流
+  flow_I_rated_A: 0.020
+
+  # ── 擴充觀察空間 ────────────────────────────────────────────
+  # 暫時關閉（SoH 資料在正式實驗前不夠精確）
+  use_extended_obs: false
+
+# ── SAC 超參數 ──────────────────────────────────────────────────
+sac:
+  actor_lr: 0.0003
+  critic_lr: 0.0003
+  gamma: 0.99
+  tau: 0.005
+  alpha: 0.2                    # 初始熵溫度
+  # action_dim=2 (power + flow_rate), target_entropy = -action_dim
+  target_entropy: -2.0
+  hidden_dim: 128               # P302 任務不需太大網路
+  buffer_size: 100000
+  batch_size: 256
+  warmup_steps: 2000            # 用隨機策略先填滿 buffer
+  update_every: 4               # 每 4 步更新一次
+
+# ── 訓練設定 ────────────────────────────────────────────────────
+training:
+  total_episodes: 2000          # 2000 集（每集 576 步 = ~115萬步總量）
+  max_steps: 576                # 與 episode_length 一致
+  eval_every: 25                # 每 25 集評估一次（更頻繁看進度）
+  eval_episodes: 3              # 評估時跑 3 集取平均
+  save_every: 100               # 每 100 集存 checkpoint
+
+  # ★ 啟用完整架構：SAC + SafetyNet + Conformal Risk Tube + OCC
+  variant: "sac_sn"             # sac / sac_sn / sac_sn_evi
+
+  # Evidential 超參（variant=sac_sn_evi 時使用）
+  lambda_evi: 0.001
+  beta_risk: 0.5
+
+# ── SafetyNet（sac_sn / sac_sn_evi 模式使用）──────────────────
+safetynet:
+  ramp_limit_kw: null
+
+# ── Conformal Prediction ─────────────────────────────────────
+conformal:
+  window: 2880                  # 殘差窗口大小（≈5集的步數）
+  delta: 0.1                    # 初始覆蓋率 = 1 - delta = 90%
+
+# ── Reward 調整 ─────────────────────────────────────────────
+reward:
+  realized_violation_penalty: 20.0
+  attempted_violation_penalty: 0.1
+  safety_projection_penalty: 0.001
+
+# ── Stress Testing（正式訓練先關閉，模型穩定後再開）───────────
+stress:
+  enable: false
+
+# ── 日誌與輸出 ───────────────────────────────────────────────
+logging:
+  log_interval: 10              # 每 10 集列印進度摘要
+  save_models: true
+  save_metrics: true
+  plot_results: true
+  csv_per_episode: true         # 每集寫一行 CSV（即時追蹤）

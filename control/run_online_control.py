@@ -15,9 +15,16 @@ sys.path.insert(0, parent_dir)
 src_dir = os.path.join(parent_dir, 'src')
 sys.path.insert(0, src_dir)
 
+# 加入 core 目錄到路徑
+core_dir = os.path.join(parent_dir, 'core')
+sys.path.insert(0, core_dir)
+# 加入 control 目錄到路徑
+control_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, control_dir)
+
 from sac_agent import SACAgent
 from safety_net import project as safety_project
-from scripts.io_protocol import (
+from io_protocol import (
 	read_vendor_data_file,  # 改用 vendor 版本讀取 Data.txt
 	write_control_file_vendor,  # 改用 vendor 版本寫入 Command.txt
 	format_ts,

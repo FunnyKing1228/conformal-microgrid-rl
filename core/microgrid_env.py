@@ -1063,7 +1063,8 @@ class MicrogridEnvironment(gym.Env):
         
         # ========== 5. 長期供電能力獎勵（基於時段預測）==========
         # 在 PV 發電高峰期（白天），鼓勵充電以應對夜間需求
-        hour = self.current_step % 24
+        steps_per_hour = max(1, int(round(1.0 / max(self.time_step, 1e-9)))) if self.time_step < 1.0 else 1
+        hour = int((self.current_step // steps_per_hour) % 24)
         if 8 <= hour <= 16:  # 白天時段（PV 發電期）
             if action > 0 and pv_kw > load_kw * 1.1:  # PV 多於負載時充電
                 reward += 0.2
@@ -1145,7 +1146,8 @@ class MicrogridEnvironment(gym.Env):
             reward -= 5.0  # 強烈懲罰越界
         
         # ========== 4. 時段策略獎勵（基於時間）==========
-        hour = self.current_step % 24
+        steps_per_hour = max(1, int(round(1.0 / max(self.time_step, 1e-9)))) if self.time_step < 1.0 else 1
+        hour = int((self.current_step // steps_per_hour) % 24)
         if 8 <= hour <= 16:  # 白天時段（PV 發電期）
             if action > 0:  # 鼓勵充電
                 reward += 0.2
