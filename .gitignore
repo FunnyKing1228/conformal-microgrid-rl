@@ -220,6 +220,9 @@ config_gui.json
 *.ckpt
 *.pkl
 # 如需追蹤特定最終模型，可用：git add -f models/best_sac_model.pth
+# 例外：SoH predictor 模型（~4.5MB，必須隨 repo 發佈）
+!core/soh_predictor/model/*.pth
+!core/soh_predictor/model/*.npz
 
 # --- 實驗跑出來的暫存結果 ---
 experiments/
