@@ -130,6 +130,7 @@ class SACAgent:
         device: str = "cpu",
         lr_actor: float = 3e-4,
         lr_critic: float = 3e-4,
+        lr_alpha: float = 1e-4,          # ★ alpha 獨立 lr（比 actor 低）
         gamma: float = 0.99,
         tau: float = 5e-3,
         alpha: float = 0.2,
@@ -183,7 +184,7 @@ class SACAgent:
         
         # Log alpha for automatic entropy adjustment
         self.log_alpha = torch.tensor(np.log(alpha), requires_grad=True, device=device)
-        self.alpha_optimizer = optim.Adam([self.log_alpha], lr=lr_actor)
+        self.alpha_optimizer = optim.Adam([self.log_alpha], lr=lr_alpha)
         
     def select_action(self, state: np.ndarray, evaluate: bool = False) -> np.ndarray:
         """Select action using current policy"""
@@ -261,11 +262,14 @@ class SACAgent:
             actor_loss.backward()
             self.actor_optimizer.step()
 
-            # Alpha update
+            # Alpha update（含 clamp 防止爆炸）
             alpha_loss = -(self.log_alpha * (log_probs_pi + self.target_entropy).detach()).mean()
             self.alpha_optimizer.zero_grad()
             alpha_loss.backward()
             self.alpha_optimizer.step()
+            # ★ Clamp log_alpha: exp(-5)≈0.007, exp(2)≈7.4
+            with torch.no_grad():
+                self.log_alpha.clamp_(min=-5.0, max=2.0)
             self.alpha = self.log_alpha.exp()
 
             # Soft update targets
@@ -325,11 +329,13 @@ class SACAgent:
             actor_loss.backward()
             self.actor_optimizer.step()
 
-            # Alpha update (no sigma-guided tweak here)
+            # Alpha update (no sigma-guided tweak here, 含 clamp)
             alpha_loss = -(self.log_alpha * (log_probs_pi + self.target_entropy).detach()).mean()
             self.alpha_optimizer.zero_grad()
             alpha_loss.backward()
             self.alpha_optimizer.step()
+            with torch.no_grad():
+                self.log_alpha.clamp_(min=-5.0, max=2.0)
             self.alpha = self.log_alpha.exp()
 
             # Soft update targets

@@ -68,6 +68,7 @@ def create_agent(config: Dict[str, Any], state_dim: int, action_dim: int, device
         device=device,
         lr_actor=sac_config['actor_lr'],
         lr_critic=sac_config['critic_lr'],
+        lr_alpha=float(sac_config.get('alpha_lr', 1e-4)),
         gamma=sac_config['gamma'],
         tau=sac_config['tau'],
         alpha=sac_config['alpha'],

@@ -63,9 +63,10 @@ sac:
   critic_lr: 0.0003
   gamma: 0.99
   tau: 0.005
-  alpha: 0.2                    # 初始熵溫度
-  # action_dim=2 (power + flow_rate), target_entropy = -action_dim
-  target_entropy: -2.0
+  alpha: 0.1                    # 初始熵溫度（降低，避免初期過度探索）
+  # SafetyNet 壓縮有效動作範圍 → target_entropy 需要比 -action_dim 保守
+  target_entropy: -1.0          # 原 -2.0 導致 alpha 爆炸
+  alpha_lr: 0.0001              # alpha 獨立 lr（比 actor 3e-4 低，緩慢調整）
   hidden_dim: 128               # P302 任務不需太大網路
   buffer_size: 100000
   batch_size: 256
@@ -98,9 +99,9 @@ conformal:
 
 # ── Reward 調整 ─────────────────────────────────────────────
 reward:
-  realized_violation_penalty: 20.0
-  attempted_violation_penalty: 0.1
-  safety_projection_penalty: 0.001
+  realized_violation_penalty: 10.0     # 降低（SafetyNet 已攔住大部分違規）
+  attempted_violation_penalty: 0.01    # 大幅降低（每步都觸發會壓垮 reward）
+  safety_projection_penalty: 0.0005   # 降低（576步×0.001 = 0.576/集，太重）
 
 # ── Stress Testing（正式訓練先關閉，模型穩定後再開）───────────
 stress:
