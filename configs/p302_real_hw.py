@@ -9,10 +9,19 @@ P302 真實硬體配置
   ・電子負載  : 4 組 × 12W @5V (最大 48W)
   ・採樣間隔  : ~11 秒 → 聚合為 15 分鐘窗格
 
-注意：
-  ・負載(48W)遠大於電池容量(0.07Wh)和MPPT(~1W)，
-    負載不直接由電池供電，而是獨立供電路徑。
-  ・RL agent 控制電池充放電，負載為需求context。
+資料來源：
+  ・MPPT/Solar → 真實太陽能時間序列（from data/raw/）
+  ・負載       → 由我們透過 load_pattern 控制（0-4 組）
+  ・電池 SoC   → 模擬計算（CSV 中的電池規格不同，不使用）
+  ・SoH        → 未來整合 SoH prediction 模型（用充電段預測）
+  ・其餘       → 全由模擬運算
+
+RL 控制輸出（對應 Command.txt 格式 PP,功率(mW),流速,）：
+  ・功率 (power_mW)     : 電池充放電功率，0~170 mW
+  ・流速 (flow_percent) : 電解液流速 0~100%
+    - 目前映射：flow% = (power / max_power) × 100%
+    - 流速影響電化學反應速率 → 充放電效率 / 容量 / 壽命
+    - TODO: 建立更精確的 flow-performance 關係模型
 """
 
 import os
