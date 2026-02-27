@@ -85,6 +85,20 @@ class MicrogridEnvironment(gym.Env):
         dataset_load_max_column: Optional[str] = None,
         dataset_soh_column: Optional[str] = None,
         dataset_flow_rate_column: Optional[str] = None,
+        # ── Flow Rate 電化學等效模型（SLFB 合成模型）────────────────────
+        # 啟用後 action space 從 1D→2D：[power_kw, flow_fraction]
+        use_flow_rate_action: bool = False,
+        # 基線內阻 R_base = (V_charge - V_discharge) / (2 × I_rated)
+        flow_R_base_ohm: float = 72.5,        # Ω（從 (8.5-5.6)/(2×0.02) 推導）
+        # 幫浦最大寄生功率 ≈ 15% 放電功率
+        flow_P_max_pump_W: float = 0.0168,     # W（16.8 mW）
+        # 內阻增幅因子（低流速 → 濃度極化 → 內阻飆升）
+        flow_k_R: float = 0.5,                # 可調超參
+        # 開路電壓（充/放電基準）
+        flow_V_OCV_charge: float = 8.5,       # V（充電時的開路電壓近似）
+        flow_V_OCV_discharge: float = 5.6,    # V（放電時的開路電壓近似）
+        # 額定電流
+        flow_I_rated_A: float = 0.020,        # A（20 mA）
     ):
         super().__init__()
         
@@ -155,6 +169,16 @@ class MicrogridEnvironment(gym.Env):
         self.load_max_data: Optional[np.ndarray] = None
         self.soh_data     : Optional[np.ndarray] = None
         self.flow_rate_data: Optional[np.ndarray] = None
+        # ── Flow Rate 電化學等效模型參數 ───────────────────────────────
+        self.use_flow_rate_action = bool(use_flow_rate_action)
+        self.flow_R_base_ohm      = float(flow_R_base_ohm)       # 基線內阻 (Ω)
+        self.flow_P_max_pump_W    = float(flow_P_max_pump_W)     # 幫浦最大寄生功率 (W)
+        self.flow_k_R             = float(flow_k_R)               # 內阻增幅因子
+        self.flow_V_OCV_charge    = float(flow_V_OCV_charge)     # 充電開路電壓 (V)
+        self.flow_V_OCV_discharge = float(flow_V_OCV_discharge)  # 放電開路電壓 (V)
+        self.flow_I_rated_A       = float(flow_I_rated_A)         # 額定電流 (A)
+        # 當前步的 flow rate action（由 step() 更新，供 info / obs 使用）
+        self._current_flow_action = 0.5  # 預設 50%
         # Effective parameters for stress
         self.soc_min_eff = self.soc_min
         self.soc_max_eff = self.soc_max
@@ -597,12 +621,23 @@ class MicrogridEnvironment(gym.Env):
                 dtype=np.float32
             )
         
-        # Action space: continuous battery power [-battery_power_kw, +battery_power_kw]
-        self.action_space = spaces.Box(
-            low=np.array([-self.battery_power_kw]),
-            high=np.array([self.battery_power_kw]),
-            dtype=np.float32
-        )
+        # Action space
+        if self.use_flow_rate_action:
+            # 2D 動作空間：[power_kw, flow_fraction]
+            # power_kw: 電池充放電功率（kW），正=充電，負=放電
+            # flow_fraction: 電解液流速 0.01~1.0（避免除以零）
+            self.action_space = spaces.Box(
+                low=np.array([-self.battery_power_kw, 0.01], dtype=np.float32),
+                high=np.array([ self.battery_power_kw, 1.00], dtype=np.float32),
+                dtype=np.float32
+            )
+        else:
+            # 1D 動作空間：battery power only
+            self.action_space = spaces.Box(
+                low=np.array([-self.battery_power_kw]),
+                high=np.array([self.battery_power_kw]),
+                dtype=np.float32
+            )
     
     def _get_state(self) -> np.ndarray:
         """獲取當前狀態（6 維標準 / 14 維擴充，由 use_extended_obs 決定）"""
@@ -665,13 +700,18 @@ class MicrogridEnvironment(gym.Env):
         else:
             soh_obs = float(np.clip(self.current_soh, 0.0, 1.0))
 
-        # Flow rate（正規化到 0~1，假設最大 20 L/min）
-        ep_flow = self.episode_data.get('flow_rate', None) if self.episode_data else None
-        if ep_flow is not None and step < len(ep_flow):
-            flow_raw = float(ep_flow[step])
+        # Flow rate（正規化到 0~1）
+        if self.use_flow_rate_action:
+            # 使用 agent 上一步的 flow action（已是 0~1）
+            flow_norm = float(np.clip(self._current_flow_action, 0.0, 1.0))
         else:
-            flow_raw = float(self.current_flow_rate_lpm)
-        flow_norm = float(np.clip(flow_raw / 20.0, 0.0, 1.0))
+            # 從外部資料或靜態值（假設最大 20 L/min）
+            ep_flow = self.episode_data.get('flow_rate', None) if self.episode_data else None
+            if ep_flow is not None and step < len(ep_flow):
+                flow_raw = float(ep_flow[step])
+            else:
+                flow_raw = float(self.current_flow_rate_lpm)
+            flow_norm = float(np.clip(flow_raw / 20.0, 0.0, 1.0))
 
         # 15 分鐘窗格能量（正規化）：kWh / 最大電池容量
         dt_h = float(self.time_step)  # 步長（小時）
@@ -698,6 +738,100 @@ class MicrogridEnvironment(gym.Env):
             energy_load_norm, # 13 負載能量（正規化）
         ], dtype=np.float32)
     
+    # ══════════════════════════════════════════════════════════════
+    # Flow Rate 電化學等效模型 (SLFB Synthetic Model)
+    # ══════════════════════════════════════════════════════════════
+    def _pump_power_W(self, Q: float) -> float:
+        """幫浦寄生功耗（立方律）。
+        
+        P_pump(Q) = P_max × Q³
+        
+        Args:
+            Q: 流速百分比 [0.01, 1.0]
+        Returns:
+            幫浦功耗 (W)
+        """
+        Q = float(np.clip(Q, 0.01, 1.0))
+        return self.flow_P_max_pump_W * (Q ** 3)
+    
+    def _equivalent_resistance(self, Q: float) -> float:
+        """等效內阻（濃度極化模型）。
+        
+        R_eq(Q) = R_base × (1 + k_R × (1 - Q) / Q)
+        
+        低流速 → 濃度極化嚴重 → 內阻飆升
+        高流速 → 反應物充足 → 內阻趨近基線
+        
+        Args:
+            Q: 流速百分比 [0.01, 1.0]
+        Returns:
+            等效內阻 (Ω)
+        """
+        Q = float(np.clip(Q, 0.01, 1.0))
+        return self.flow_R_base_ohm * (1.0 + self.flow_k_R * (1.0 - Q) / Q)
+    
+    def _cell_voltage(self, Q: float, is_charging: bool) -> float:
+        """計算含流速效應的電池端電壓。
+        
+        充電：V_cell = V_OCV_charge + I × R_eq(Q)  （需更高電壓推入電流）
+        放電：V_cell = V_OCV_discharge - I × R_eq(Q)（端電壓被內阻拉低）
+        
+        Args:
+            Q: 流速百分比 [0.01, 1.0]
+            is_charging: True=充電, False=放電
+        Returns:
+            電池端電壓 (V)
+        """
+        R_eq = self._equivalent_resistance(Q)
+        I = self.flow_I_rated_A
+        if is_charging:
+            return self.flow_V_OCV_charge + I * R_eq
+        else:
+            # 放電時端電壓不可低於 0
+            return max(0.0, self.flow_V_OCV_discharge - I * R_eq)
+    
+    def _flow_efficiency(self, Q: float, is_charging: bool) -> float:
+        """計算流速對充放電效率的影響。
+        
+        充電效率 = V_OCV / V_cell_charge（需要的電壓越高，效率越低）
+        放電效率 = V_cell_discharge / V_OCV（端電壓越低，效率越低）
+        
+        Args:
+            Q: 流速百分比 [0.01, 1.0]
+            is_charging: True=充電, False=放電
+        Returns:
+            效率倍率 (0~1)，會乘在基礎 battery_efficiency 之上
+        """
+        R_eq = self._equivalent_resistance(Q)
+        I = self.flow_I_rated_A
+        if is_charging:
+            V_cell = self.flow_V_OCV_charge + I * R_eq
+            # 效率 = OCV / 實際充電電壓（充電越費力效率越低）
+            return float(np.clip(self.flow_V_OCV_charge / max(V_cell, 1e-6), 0.01, 1.0))
+        else:
+            V_cell = max(0.0, self.flow_V_OCV_discharge - I * R_eq)
+            # 效率 = 實際放電電壓 / OCV（端電壓越低效率越低）
+            return float(np.clip(V_cell / max(self.flow_V_OCV_discharge, 1e-6), 0.01, 1.0))
+    
+    def _net_power_W(self, gross_power_W: float, Q: float) -> float:
+        """計算扣除幫浦功耗後的淨功率。
+        
+        P_net = P_gross - P_pump(Q)
+        
+        Args:
+            gross_power_W: 電池毛功率 (W)，正=充電，負=放電
+            Q: 流速百分比 [0.01, 1.0]
+        Returns:
+            淨功率 (W)
+        """
+        P_pump = self._pump_power_W(Q)
+        if gross_power_W >= 0:
+            # 充電：幫浦也消耗功率，實際充入電池的功率減少
+            return gross_power_W - P_pump
+        else:
+            # 放電：幫浦消耗部分輸出，淨輸出減少
+            return gross_power_W + P_pump  # gross_power_W 是負的，所以 +P_pump 使其更接近 0
+
     def _update_battery_soc(self, action: float) -> float:
         """更新電池SoC"""
         # Convert action from kW to kWh using effective dt
@@ -1059,6 +1193,7 @@ class MicrogridEnvironment(gym.Env):
         self.current_soc = 0.5  # Start at 50% SoC
         self.current_soh = float(self._initial_soh)   # 每回合重置 SoH
         self.current_flow_rate_lpm = float(self._initial_flow_rate_lpm)
+        self._current_flow_action = 0.5  # 重置 flow action 為 50%
         self.total_revenue = 0.0
         self.total_cost = 0.0
         self.soc_violations = 0
@@ -1173,12 +1308,23 @@ class MicrogridEnvironment(gym.Env):
         return initial_state, info
     
     def step(self, action: List[float]) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
-        """執行一步環境互動"""
+        """執行一步環境互動
+        
+        action 格式：
+          - 1D 模式（use_flow_rate_action=False）：[power_kw]
+          - 2D 模式（use_flow_rate_action=True） ：[power_kw, flow_fraction]
+            flow_fraction ∈ [0.01, 1.0]（百分比，0.01=1%, 1.0=100%）
+        """
         if self.current_step >= self.episode_length:
             return self._get_state(), 0.0, True, False, {}
         
-        # 解析動作（kW）
+        # ── 解析動作 ───────────────────────────────────────────────
         action_kw = float(action[0])
+        if self.use_flow_rate_action and len(action) >= 2:
+            flow_action = float(np.clip(action[1], 0.01, 1.0))
+        else:
+            flow_action = 0.5  # 預設 50% 流速
+        self._current_flow_action = flow_action
         
         # Phase-1: 檢查 ramp limit
         if self.ramp_limit_kw is not None:
@@ -1206,25 +1352,39 @@ class MicrogridEnvironment(gym.Env):
         if self.stress_enable and self.stress_power_loss_ratio > 0.0:
             loss_ratio = float(self.stress_power_loss_ratio)
             if applied_action_kw > 0:  # 充電
-                # 實際需要的功率 = 命令功率 / (1 - loss_ratio)
                 applied_action_kw = applied_action_kw / max(1e-6, 1.0 - loss_ratio)
             elif applied_action_kw < 0:  # 放電
-                # 實際輸出的功率 = 命令功率 * (1 - loss_ratio)
                 applied_action_kw = applied_action_kw * (1.0 - loss_ratio)
-            # 限制在物理功率範圍內
             applied_action_kw = float(np.clip(applied_action_kw, -self.battery_power_kw, self.battery_power_kw))
+        
+        # ── Flow Rate 效應：修正效率與計算幫浦功耗 ────────────────────
+        pump_power_kw = 0.0
+        flow_eta_modifier = 1.0  # 流速對效率的倍率
+        net_power_kw = applied_action_kw  # 預設 = gross（若無 flow 模型）
+        
+        if self.use_flow_rate_action:
+            Q = flow_action
+            # 幫浦寄生功耗（W → kW）
+            pump_power_kw = self._pump_power_W(Q) / 1000.0
+            # 流速效率修正
+            is_charging = (applied_action_kw >= 0)
+            flow_eta_modifier = self._flow_efficiency(Q, is_charging)
+            # 淨功率（kW）：扣除幫浦功耗
+            net_power_kw = self._net_power_W(applied_action_kw * 1000.0, Q) / 1000.0
         
         # 設定有效 dt 與效率（提供給 _update_battery_soc 使用）
         if self.stress_enable:
             dt_jitter = 1.0 + float(np.random.randn()) * self.stress_dt_jitter_std
             self._effective_time_step = max(1e-3, float(self.time_step) * dt_jitter)
             eta_noise = 1.0 + float(np.random.randn()) * self.stress_efficiency_noise_std
-            self._effective_efficiency = float(np.clip(self.battery_efficiency * eta_noise, 1e-3, 1.0))
+            self._effective_efficiency = float(np.clip(
+                self.battery_efficiency * eta_noise * flow_eta_modifier, 1e-3, 1.0))
         else:
             self._effective_time_step = float(self.time_step)
-            self._effective_efficiency = float(self.battery_efficiency)
+            self._effective_efficiency = float(np.clip(
+                self.battery_efficiency * flow_eta_modifier, 1e-3, 1.0))
 
-        # 更新電池 SoC（使用 applied_action_kw）
+        # 更新電池 SoC（使用 applied_action_kw；效率已含 flow 修正）
         old_soc = self.current_soc
         # 預估未夾限的下一步 SoC，用於計算實際違規能量（kWh）
         try:
@@ -1238,7 +1398,7 @@ class MicrogridEnvironment(gym.Env):
         elif soc_next_raw > self.soc_max:
             energy_violate_kwh = (soc_next_raw - self.soc_max) * self.battery_capacity_kwh
 
-        # 物理護欄（僅在 hard_guard 開啟時啟用）：若預測越界，反解動作貼到邊界，避免實際越界
+        # 物理護欄（僅在 hard_guard 開啟時啟用）：若預測越界，反解動作貼到邊界
         if self.hard_guard and (soc_next_raw < self.soc_min or soc_next_raw > self.soc_max):
             dt = float(self.time_step)
             eta = float(self.battery_efficiency)
@@ -1254,6 +1414,8 @@ class MicrogridEnvironment(gym.Env):
 
         self.current_soc = self._update_battery_soc(applied_action_kw)
         self._prev_exec_action_kw = applied_action_kw
+        # 更新 flow rate（轉換為 L/min 供 info 使用；假設 100% = 20 L/min）
+        self.current_flow_rate_lpm = flow_action * 20.0
 
         # ── SoH 衰減（每步根據吞吐量計算）──────────────────────────
         if self.soh_degradation_per_kwh > 0.0:
@@ -1263,22 +1425,24 @@ class MicrogridEnvironment(gym.Env):
                 0.0, 1.0
             ))
         
-        # SoC 違規累計已在 _update_battery_soc 中處理，這裡不再重複加計
-        
         # 計算淨負載和電價
         load_kw = self.episode_data['load'][self.current_step]
         pv_kw = self.episode_data['pv'][self.current_step]
         price = self.episode_data['price'][self.current_step]
         
-        net_load = load_kw - pv_kw + applied_action_kw
+        # 使用 net_power（扣除幫浦功耗）計算淨負載
+        net_load = load_kw - pv_kw + net_power_kw
         
-        # 計算財務指標
-        if applied_action_kw < 0:  # 放電（賣電）
-            revenue = abs(applied_action_kw) * self.time_step * price
+        # 計算財務指標（以淨功率計算）
+        if net_power_kw < 0:  # 放電（賣電）
+            revenue = abs(net_power_kw) * self.time_step * price
             cost = 0.0
         else:  # 充電（買電）
             revenue = 0.0
-            cost = applied_action_kw * self.time_step * price
+            cost = net_power_kw * self.time_step * price
+        # 幫浦運行成本（額外電費）
+        pump_cost = pump_power_kw * self.time_step * price
+        cost += pump_cost
         
         self.total_revenue += revenue
         self.total_cost += cost
@@ -1287,11 +1451,21 @@ class MicrogridEnvironment(gym.Env):
         if self.allow_grid_trading:
             reward = self._calculate_reward_phase1(action_kw, net_load, price)
         else:
-            # 無電網交易模式（孤島模式）
-            # 由於負載資料是假的（電子負載），直接使用簡化版本
-            # 簡化版本專注於 PV 利用率和 SoC 管理，不依賴負載資料
             reward = self._calculate_reward_no_grid_simplified(action_kw, pv_kw, price)
-        # 追加：對未夾限 SoC 的實際越界能量施以強懲罰（不受縮放影響）
+        
+        # ── Flow Rate 獎勵調整 ─────────────────────────────────────
+        if self.use_flow_rate_action:
+            # 懲罰幫浦功耗佔比（鼓勵 agent 在低功率時降低流速節能）
+            if abs(applied_action_kw) > 1e-9:
+                pump_ratio = pump_power_kw / max(abs(applied_action_kw), 1e-9)
+                reward -= 0.1 * pump_ratio  # 幫浦佔比越高懲罰越大
+            # 懲罰極端低流速（內阻飆升，效率差）
+            if flow_action < 0.1:
+                R_eq = self._equivalent_resistance(flow_action)
+                R_penalty = (R_eq / self.flow_R_base_ohm - 1.0) * 0.01
+                reward -= R_penalty
+        
+        # 追加：對未夾限 SoC 的實際越界能量施以強懲罰
         if energy_violate_kwh > 0.0:
             penalty_per_kwh = float(getattr(self, 'realized_violation_penalty', 20.0))
             scale_guard = max(float(self.reward_scaling), 1e-9)
@@ -1313,6 +1487,12 @@ class MicrogridEnvironment(gym.Env):
             'current_soc': self.current_soc,
             'current_soh': self.current_soh,
             'flow_rate_lpm': self.current_flow_rate_lpm,
+            'flow_action': flow_action,
+            'pump_power_kw': pump_power_kw,
+            'flow_efficiency': flow_eta_modifier,
+            'net_power_kw': net_power_kw,
+            'gross_power_kw': applied_action_kw,
+            'R_eq_ohm': self._equivalent_resistance(flow_action) if self.use_flow_rate_action else 0.0,
             'net_load': net_load,
             'price': price,
             'step': self.current_step,
