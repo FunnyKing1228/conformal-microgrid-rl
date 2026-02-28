@@ -1101,86 +1101,92 @@ class MicrogridEnvironment(gym.Env):
     
     def _calculate_reward_no_grid_simplified(self, action: float, pv_kw: float, price: float) -> float:
         """
-        無電網交易版本的 reward function（簡化版，不依賴負載資料）
+        P302 微型電池（SLFB 鋅空氣）專用 reward function
+        ================================================
         
-        適用於：Data.txt 格式中沒有負載資料的情況
-        
-        核心目標：
-        1. 最大化 PV 利用率
-        2. SoC 管理（維持合適的 SoC）
-        3. 能源效率（減少無意義循環）
-        4. 時段策略（白天充電，夜間放電）
+        設計原則：
+        - 電池容量 0.07 Wh、功率 0.17 mW → 經濟套利無意義
+        - 核心目標：學會 SoC 管理（日間充、夜間放、維持中間值）
+        - 所有 reward 項目歸一化到 [-1, +1] 範圍，避免尺度爆炸
+        - 讓 agent 學到「充滿了就該放、放光了就該充」的直覺
         
         Args:
             action: 電池動作（kW），正數=充電，負數=放電
             pv_kw: PV 發電（kW）
-            price: 電價（$/kWh，可用於時段重要性加權）
+            price: 電價（此版本主要作為時段指標）
         """
         reward = 0.0
-        dt = self.time_step
+        soc = self.current_soc
+        pmax = max(self.battery_power_kw, 1e-9)
+        action_norm = action / pmax  # [-1, +1]
         
-        # ========== 1. PV 利用率獎勵（鼓勵充分利用太陽能）==========
-        if pv_kw > 1e-6:
-            # 如果 PV 大於電池功率，且正在充電 → 充分利用 PV
-            if action > 0:
-                # 鼓勵在 PV 發電時充電
-                pv_utilization = min(1.0, abs(action) / max(pv_kw, 1e-6))
-                reward += 0.5 * pv_utilization
-                # 如果 PV 很大，且充電功率接近 PV → 更充分利用
-                if pv_utilization > 0.8:
-                    reward += 0.2
+        # ══════════════════════════════════════════════════════════
+        # 1. SoC 中心化獎勵（最重要！）— 二次函數，目標 0.5
+        #    SoC=0.5 → +0.3, SoC=0.1/0.9 → -0.18, SoC=0/1 → -0.45
+        # ══════════════════════════════════════════════════════════
+        soc_deviation = (soc - 0.5) ** 2  # 0~0.25
+        reward += 0.3 - 3.0 * soc_deviation  # +0.3 at center, -0.45 at edge
         
-        # ========== 2. SoC 管理獎勵（維持合適的 SoC）==========
-        soc_target_range = (0.4, 0.7)  # 理想 SoC 區間
-        if soc_target_range[0] <= self.current_soc <= soc_target_range[1]:
-            reward += 0.1  # 維持在理想區間
-        elif self.current_soc < 0.2:
-            # SoC 過低，可能無法應對未來高負載
-            reward -= 0.05 * (0.2 - self.current_soc) / 0.2
-        elif self.current_soc > 0.9:
-            # SoC 過高，可能無法儲存多餘的 PV
-            reward -= 0.02 * (self.current_soc - 0.9) / 0.1
+        # ══════════════════════════════════════════════════════════
+        # 2. 動作方向獎勵（SoC 高→鼓勵放電，SoC 低→鼓勵充電）
+        #    讓 agent 學會「該充就充、該放就放」
+        # ══════════════════════════════════════════════════════════
+        # soc > 0.6: 希望 action < 0 (放電)
+        # soc < 0.4: 希望 action > 0 (充電)
+        # soc 0.4~0.6: 兩者皆可
+        direction_signal = 0.0
+        if soc > 0.65:
+            # SoC 偏高 → 放電有獎、充電有罰
+            direction_signal = -action_norm * min(1.0, (soc - 0.5) * 4.0)
+        elif soc < 0.35:
+            # SoC 偏低 → 充電有獎、放電有罰
+            direction_signal = action_norm * min(1.0, (0.5 - soc) * 4.0)
+        reward += 0.3 * direction_signal
         
-        # ========== 3. SoC 違反懲罰（安全限制）==========
-        if self.current_soc < self.soc_min or self.current_soc > self.soc_max:
-            reward -= 5.0  # 強烈懲罰越界
+        # ══════════════════════════════════════════════════════════
+        # 3. PV 利用率（有陽光時充電更好）
+        # ══════════════════════════════════════════════════════════
+        if pv_kw > 0.1 * pmax and action > 0 and soc < 0.7:
+            pv_util = min(1.0, abs(action) / max(pv_kw, 1e-9))
+            reward += 0.15 * pv_util
         
-        # ========== 4. 時段策略獎勵（基於時間）==========
+        # ══════════════════════════════════════════════════════════
+        # 4. 時段策略（日間充電、夜間可放電）
+        # ══════════════════════════════════════════════════════════
         steps_per_hour = max(1, int(round(1.0 / max(self.time_step, 1e-9)))) if self.time_step < 1.0 else 1
         hour = int((self.current_step // steps_per_hour) % 24)
-        if 8 <= hour <= 16:  # 白天時段（PV 發電期）
-            if action > 0:  # 鼓勵充電
-                reward += 0.2
-                # 如果 PV 很大，充電更有利
-                if pv_kw > 0.5 * self.battery_power_kw:
-                    reward += 0.1
-            # 避免白天過度放電（除非 SoC 很高）
-            if action < -0.3 * self.battery_power_kw and self.current_soc < 0.7:
-                reward -= 0.1
-        elif 18 <= hour <= 23 or 0 <= hour <= 6:  # 夜間/清晨時段（無 PV）
-            # 允許放電，但要保護低 SoC
-            if action < 0 and self.current_soc > 0.3:
-                reward += 0.1
-            # 避免夜間過度放電（保護低 SoC）
-            if action < -0.2 * self.battery_power_kw and self.current_soc < 0.3:
-                reward -= 0.2
         
-        # ========== 5. 動作平滑性懲罰（減少快速變化）==========
-        if hasattr(self, 'prev_action_kw'):
-            action_change = abs(action - self.prev_action_kw)
-            smoothness_penalty = -0.001 * (action_change / self.battery_power_kw) ** 2
-            reward += smoothness_penalty
+        if 8 <= hour <= 16:  # 白天（PV 時段）
+            if action > 0 and soc < 0.7:
+                reward += 0.05  # 溫和鼓勵充電（但 SoC 高就不鼓勵）
+        elif 18 <= hour <= 23 or 0 <= hour <= 6:  # 夜間
+            if action < 0 and soc > 0.3:
+                reward += 0.05  # 溫和鼓勵放電
         
-        # ========== 6. 能源效率懲罰（減少無意義循環）==========
-        # 如果 SoC 已經很高，還繼續充電且 PV 不大 → 浪費
-        if self.current_soc > 0.8 and action > 0.2 * self.battery_power_kw and pv_kw < 0.3 * self.battery_power_kw:
-            reward -= 0.05
-        # 如果 SoC 已經很低，還繼續放電 → 危險
-        if self.current_soc < 0.2 and action < -0.2 * self.battery_power_kw:
-            reward -= 0.1
+        # ══════════════════════════════════════════════════════════
+        # 5. SoC 邊界強懲罰（硬約束信號）
+        # ══════════════════════════════════════════════════════════
+        if soc < self.soc_min or soc > self.soc_max:
+            reward -= 2.0  # 越界重罰
+        elif soc > 0.85:
+            # 接近上限但還沒越界 → 漸進懲罰
+            reward -= 0.5 * ((soc - 0.85) / 0.05) ** 2
+        elif soc < 0.15:
+            # 接近下限
+            reward -= 0.5 * ((0.15 - soc) / 0.05) ** 2
         
-        # ========== 7. Throughput 懲罰（抑制無意義能量循環）==========
-        reward -= 0.01 * abs(action) * dt
+        # ══════════════════════════════════════════════════════════
+        # 6. 無意義動作懲罰（SoC 極端時仍往錯誤方向）
+        # ══════════════════════════════════════════════════════════
+        if soc > 0.8 and action > 0.1 * pmax:
+            reward -= 0.3  # SoC 很高還充 → 重罰
+        if soc < 0.2 and action < -0.1 * pmax:
+            reward -= 0.3  # SoC 很低還放 → 重罰
+        
+        # ══════════════════════════════════════════════════════════
+        # 7. 小幅 throughput 懲罰（防止無意義高頻充放）
+        # ══════════════════════════════════════════════════════════
+        reward -= 0.02 * abs(action_norm)
         
         return reward * self.reward_scaling
     

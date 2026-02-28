@@ -30,8 +30,9 @@ env:
   # CSV 欄位映射
   dataset_time_column: "timestamp"
 
-  # P302 有市電接入（scenario 1~4 包含 grid）
-  allow_grid_trading: true
+  # P302 電池太小（0.07Wh），電網套利無意義
+  # 使用 no-grid reward → 聚焦 SoC 管理 + PV 利用
+  allow_grid_trading: false
 
   # SafetyNet 的 ramp 設定
   ramp_limit_kw: null            # 先不限 ramp（電池功率已很小）
