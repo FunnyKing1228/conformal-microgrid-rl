@@ -195,7 +195,19 @@ def train_sac_with_microgrid(
     warmup_steps = config['sac']['warmup_steps']
     # 讀取 variant 開關（預設 sac 作為 Baseline）
     variant = config.get('training', {}).get('variant', 'sac')
-    use_safetynet = variant in ('sac_sn', 'sac_sn_evi')
+    variant_needs_sn = variant in ('sac_sn', 'sac_sn_evi')
+
+    # ── Curriculum 機制：前 N 集用純 SAC，之後開啟 SafetyNet ──────
+    # safetynet_warmup_episodes = 0 表示從第 0 集就啟用（傳統行為）
+    sn_warmup_eps = int(config.get('training', {}).get('safetynet_warmup_episodes', 0))
+    if variant_needs_sn and sn_warmup_eps > 0:
+        use_safetynet = False  # Phase 1: 純 SAC
+        curriculum_enabled = True
+        curriculum_switched = False
+    else:
+        use_safetynet = variant_needs_sn
+        curriculum_enabled = False
+        curriculum_switched = not variant_needs_sn  # 已經不需要切換
 
     # Training metrics
     episode_rewards = []
@@ -238,7 +250,10 @@ def train_sac_with_microgrid(
     print(f"  Steps/episode : {max_steps}")
     print(f"  Total steps   : {total_episodes * max_steps:,}")
     print(f"  Variant       : {variant}")
-    print(f"  SafetyNet     : {'ON' if use_safetynet else 'OFF'}")
+    if curriculum_enabled:
+        print(f"  SafetyNet     : CURRICULUM (OFF for EP 0~{sn_warmup_eps-1}, ON from EP {sn_warmup_eps})")
+    else:
+        print(f"  SafetyNet     : {'ON' if use_safetynet else 'OFF'}")
     print(f"  Device        : {agent.device}")
     print(f"  Warmup        : {warmup_steps} steps")
     print(f"  Eval every    : {eval_every} episodes ({eval_episodes} eps each)")
@@ -251,6 +266,29 @@ def train_sac_with_microgrid(
     print(f"{'='*70}\n")
     
     for episode in range(total_episodes):
+        # ── Curriculum 切換：達到 warmup 集數時啟動 SafetyNet ────────
+        if curriculum_enabled and not curriculum_switched and episode >= sn_warmup_eps:
+            use_safetynet = True
+            curriculum_switched = True
+            # 清空 conformal 殘差，讓 CRTSN 從零開始收集
+            try:
+                clear_residual_buffer()
+                set_conformal_params(
+                    window=current_conformal_window,
+                    delta=float(conformal_cfg.get('delta', 0.1))
+                )
+            except Exception:
+                pass
+            # 重置 adaptive loop 參數
+            current_conformal_delta = float(conformal_cfg.get('delta', 0.1))
+            projected_penalty_mult = 1.0
+            print(f"\n{'*'*70}")
+            print(f"  ★ CURRICULUM SWITCH @ Episode {episode}")
+            print(f"    Phase 1 (Pure SAC) → Phase 2 (SAC + CRTSN + OCC + Adaptive)")
+            print(f"    SafetyNet: ON | Conformal buffer: cleared")
+            print(f"    Conformal delta: {current_conformal_delta:.3f}")
+            print(f"{'*'*70}\n")
+
         state, info = env.reset()
         episode_reward = 0
         episode_length = 0
@@ -525,7 +563,8 @@ def train_sac_with_microgrid(
             eta_sec = (total_episodes - episode - 1) / max(eps_per_sec, 1e-9)
             pct = (episode + 1) / total_episodes * 100
 
-            print(f"\n── Ep {episode:4d}/{total_episodes} ({pct:5.1f}%) "
+            phase_tag = "Phase2:CORAL" if use_safetynet else "Phase1:SAC"
+            print(f"\n── Ep {episode:4d}/{total_episodes} ({pct:5.1f}%) [{phase_tag}] "
                   f"| {elapsed/60:.1f}min elapsed | ETA {eta_sec/60:.1f}min ──")
             print(f"   Reward(avg{n_back})={avg_reward:8.2f}  "
                   f"Violations: att={avg_attempted:.1f} proj={avg_projected:.1f} real={avg_realized:.1f}")
@@ -914,8 +953,14 @@ def main():
     compute_res = collect_compute_resources(agent, device, training_time)
     
     # Save results to experiment directory
+    # 從 config 重新推導 curriculum 資訊（避免依賴訓練函數內部變數）
+    _variant = config.get('training', {}).get('variant', 'sac')
+    _sn_warmup = int(config.get('training', {}).get('safetynet_warmup_episodes', 0))
+    _curriculum = _variant in ('sac_sn', 'sac_sn_evi') and _sn_warmup > 0
     metadata = {
-        'variant': config.get('training', {}).get('variant', 'sac'),
+        'variant': _variant,
+        'curriculum': _curriculum,
+        'safetynet_warmup_episodes': _sn_warmup if _curriculum else 0,
         'time_step': float(getattr(env, 'time_step', 1.0)),
         'seed': int(config.get('random_seed', 0)),
     }

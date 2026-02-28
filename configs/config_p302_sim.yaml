@@ -1,14 +1,15 @@
 # ═══════════════════════════════════════════════════════════════════
-# P302 SLFB 鋅空氣電池 ── 正式模擬訓練配置 v4
-# 架構: 純 SAC（訓練時不用 SafetyNet，deployment 時再啟用）
+# P302 SLFB 鋅空氣電池 ── 正式模擬訓練配置 v5 (Curriculum)
+# 架構: CORAL 三層式安全 RL（CRTSN + OCC + Adaptive Loop）
 # ─────────────────────────────────────────────────────────────────
-# v4 修正：
-#   - v2/v3 失敗原因：SafetyNet 在訓練時覆寫 575/576 步動作
-#     因為 P302 電池極小（一步 ΔSoC 可達 60%），SafetyNet 的 SoC
-#     投影幾乎把每個動作壓成 0，agent 完全無法學習
-#   - 解法：訓練用 variant=sac（純 SAC），靠 reward 引導安全行為
-#     deployment 時再套 SafetyNet 做硬護欄
-#   - alpha clamp 收緊到 [-5, 0]（max alpha=1.0）
+# v5 修正：
+#   - v4 純 SAC 訓練成功（reward=168, SoC_mean=0.50），但 OCC 完全
+#     沒有學到東西（delta_kw=0），等於不是 CORAL
+#   - 解法：Curriculum 訓練
+#     Phase 1 (EP 0~299): 純 SAC，學會基本 SoC 管理
+#     Phase 2 (EP 300~1999): SAC + CRTSN + OCC + Adaptive Loop
+#     因為 agent 已學會用小動作控制，SafetyNet 不會覆寫 99.8% 步驟
+#   - alpha clamp 保持 [-5, 0]（max alpha=1.0，防爆炸）
 # ═══════════════════════════════════════════════════════════════════
 
 random_seed: 42
@@ -72,7 +73,7 @@ sac:
   gamma: 0.99
   tau: 0.005
   alpha: 0.05                   # 初始熵溫度（低，鼓勵早期收斂）
-  target_entropy: -2.0          # 標準值 = -action_dim（無 SafetyNet 壓縮）
+  target_entropy: -2.0          # 標準值 = -action_dim
   alpha_lr: 0.0001              # alpha 獨立 lr（比 actor 3e-4 低，緩慢調整）
   hidden_dim: 128               # P302 任務不需太大網路
   buffer_size: 100000
@@ -88,31 +89,32 @@ training:
   eval_episodes: 3              # 評估時跑 3 集取平均
   save_every: 100               # 每 100 集存 checkpoint
 
-  # ★ v4: 純 SAC（不用 SafetyNet）
-  # 原因：P302 電池一步 ΔSoC=60%，SafetyNet 覆寫 99.8% 的動作，學不了
-  # Deployment 時再套 SafetyNet 做安全護欄
-  variant: "sac"                # sac / sac_sn / sac_sn_evi
+  # ★ v5: CORAL Curriculum 訓練
+  # Phase 1 (EP 0~299): 純 SAC — agent 先學基本 SoC 管理
+  # Phase 2 (EP 300~1999): SAC + CRTSN + OCC + Adaptive — 三層全開
+  variant: "sac_sn"
+  safetynet_warmup_episodes: 300
 
   # Evidential 超參（variant=sac_sn_evi 時使用）
   lambda_evi: 0.001
   beta_risk: 0.5
 
-# ── SafetyNet（僅 deployment 時使用）──────────────────────────
+# ── SafetyNet（Phase 2 啟用）──────────────────────────────────
 safetynet:
-  ramp_limit_kw: null
+  ramp_limit_kw: null           # 不限制 ramp（電池功率極小）
 
-# ── Conformal Prediction（純 SAC 模式下不影響訓練）──────────────
+# ── Conformal Prediction ────────────────────────────────────────
 conformal:
   window: 2880                  # 殘差窗口大小（≈5集的步數）
   delta: 0.1                    # 初始覆蓋率 = 1 - delta = 90%
 
 # ── Reward 調整 ─────────────────────────────────────────────
 reward:
-  # v4: 無 SafetyNet → 這些 penalty 不會生效
-  # 保留設定值供日後需要
+  # Phase 1: 這些 penalty 不生效（SafetyNet OFF）
+  # Phase 2: SafetyNet ON 時啟動
   realized_violation_penalty: 10.0
-  attempted_violation_penalty: 0.0
-  safety_projection_penalty: 0.0
+  attempted_violation_penalty: 0.01
+  safety_projection_penalty: 0.0005
 
 # ── Stress Testing（不使用）──────────────────────────────────
 stress:
