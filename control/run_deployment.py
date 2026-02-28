@@ -560,7 +560,8 @@ def main():
     step_count = 0
 
     # 上一次動作（用於持續更新 Command.txt）
-    last_power_mw = 0.0
+    # 注意：write_control_file_vendor 期望 power 單位為 W（內部 ×1000 轉 mW）
+    last_power_w = 0.0
     last_flow_pct = 0.0
     last_sit_code = 4  # 待機
     last_command_write: Optional[datetime] = None
@@ -584,10 +585,10 @@ def main():
         # 隨機小功率動作
         rnd_power_kw = float(np.random.uniform(-BATTERY_PMAX_KW, BATTERY_PMAX_KW))
         rnd_flow_pct = float(np.random.uniform(10, 50))
-        last_power_mw = abs(rnd_power_kw) * 1e6  # kW → mW
+        last_power_w = abs(rnd_power_kw) * 1e3  # kW → W
         last_flow_pct = rnd_flow_pct
         last_sit_code = determine_situation(rnd_power_kw, 0.0, 0.0)
-        print(f"  [初始] 隨機動作: power={last_power_mw:.1f}mW, flow={last_flow_pct:.0f}%")
+        print(f"  [初始] 隨機動作: power={last_power_w*1000:.1f}mW ({last_power_w:.4f}W), flow={last_flow_pct:.0f}%")
     else:
         print(f"  [初始] 待機: power=0mW, flow=0%")
 
@@ -680,17 +681,18 @@ def main():
                 # 情況碼
                 sit_code = determine_situation(action_kw, load_kw, pv_kw)
 
-                # Command.txt 輸出值
-                power_mw = abs(action_kw) * 1e6  # kW → mW
+                # Command.txt 輸出值（W 單位，write_control_file_vendor 內部 ×1000 轉 mW）
+                power_w = abs(action_kw) * 1e3  # kW → W
+                power_mw_display = power_w * 1000.0  # 顯示用 mW
                 direction = "充電" if action_kw > 0.0001 else ("放電" if action_kw < -0.0001 else "待機")
 
                 print(f"\n  決策: 情況{sit_code}({direction})")
-                print(f"    功率: {power_mw:.1f} mW ({action_kw*1e6:.1f} μW = {action_kw*1e3:.4f} W)")
+                print(f"    功率: {power_mw_display:.1f} mW = {power_w:.4f} W")
                 print(f"    流速: {flow_pct:.0f}%")
                 print(f"    raw action: {action_norm}")
 
                 # 更新記憶
-                last_power_mw = power_mw
+                last_power_w = power_w
                 last_flow_pct = flow_pct
                 last_sit_code = sit_code
 
@@ -699,7 +701,7 @@ def main():
                     write_ts = datetime.now(TZ_UTC8)
                     success = write_control_file_vendor(
                         args.command_file,
-                        {pp: (write_ts, power_mw, flow_pct)},
+                        {pp: (write_ts, power_w, flow_pct)},
                         global_ts=write_ts,
                         require_empty=True,
                         max_wait_sec=0.2,
@@ -709,7 +711,7 @@ def main():
                     if not success:
                         success = write_control_file_vendor(
                             args.command_file,
-                            {pp: (write_ts, power_mw, flow_pct)},
+                            {pp: (write_ts, power_w, flow_pct)},
                             global_ts=write_ts,
                             require_empty=False,
                             max_wait_sec=0.1,
@@ -744,7 +746,7 @@ def main():
                     'completeness': f'{agg["completeness"]:.3f}',
                     'action_power_kw': f'{action_kw:.8f}',
                     'action_flow_pct': f'{flow_pct:.1f}',
-                    'power_mw_cmd': f'{power_mw:.1f}',
+                    'power_mw_cmd': f'{power_mw_display:.1f}',
                     'flow_pct_cmd': f'{flow_pct:.1f}',
                     'situation_code': sit_code,
                     'load_groups': load_groups,
@@ -771,7 +773,7 @@ def main():
                 if should_update:
                     success = write_control_file_vendor(
                         args.command_file,
-                        {pp: (now_ts, last_power_mw, last_flow_pct)},
+                        {pp: (now_ts, last_power_w, last_flow_pct)},
                         global_ts=now_ts,
                         require_empty=True,
                         max_wait_sec=0.1,
@@ -781,7 +783,7 @@ def main():
                     if not success:
                         write_control_file_vendor(
                             args.command_file,
-                            {pp: (now_ts, last_power_mw, last_flow_pct)},
+                            {pp: (now_ts, last_power_w, last_flow_pct)},
                             global_ts=now_ts,
                             require_empty=False,
                             max_wait_sec=0.05,
