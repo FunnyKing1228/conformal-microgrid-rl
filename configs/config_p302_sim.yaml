@@ -1,7 +1,14 @@
 # ═══════════════════════════════════════════════════════════════════
-# P302 SLFB 鋅空氣電池 ── 正式模擬訓練配置
-# 架構: SAC + SafetyNet + Conformal Risk Tube + OCC + Adaptive Loop
-# 下週 deploy 到實體硬體
+# P302 SLFB 鋅空氣電池 ── 正式模擬訓練配置 v4
+# 架構: 純 SAC（訓練時不用 SafetyNet，deployment 時再啟用）
+# ─────────────────────────────────────────────────────────────────
+# v4 修正：
+#   - v2/v3 失敗原因：SafetyNet 在訓練時覆寫 575/576 步動作
+#     因為 P302 電池極小（一步 ΔSoC 可達 60%），SafetyNet 的 SoC
+#     投影幾乎把每個動作壓成 0，agent 完全無法學習
+#   - 解法：訓練用 variant=sac（純 SAC），靠 reward 引導安全行為
+#     deployment 時再套 SafetyNet 做硬護欄
+#   - alpha clamp 收緊到 [-5, 0]（max alpha=1.0）
 # ═══════════════════════════════════════════════════════════════════
 
 random_seed: 42
@@ -34,8 +41,8 @@ env:
   # 使用 no-grid reward → 聚焦 SoC 管理 + PV 利用
   allow_grid_trading: false
 
-  # SafetyNet 的 ramp 設定
-  ramp_limit_kw: null            # 先不限 ramp（電池功率已很小）
+  # 無 ramp limit（電池功率已很小，且不用 sim-to-real 噪音）
+  ramp_limit_kw: null
   hard_guard: false
 
   # ── Flow Rate 電化學等效模型（SLFB 鋅空氣電池）────────────────────
@@ -64,9 +71,8 @@ sac:
   critic_lr: 0.0003
   gamma: 0.99
   tau: 0.005
-  alpha: 0.1                    # 初始熵溫度（降低，避免初期過度探索）
-  # SafetyNet 壓縮有效動作範圍 → target_entropy 需要比 -action_dim 保守
-  target_entropy: -1.0          # 原 -2.0 導致 alpha 爆炸
+  alpha: 0.05                   # 初始熵溫度（低，鼓勵早期收斂）
+  target_entropy: -2.0          # 標準值 = -action_dim（無 SafetyNet 壓縮）
   alpha_lr: 0.0001              # alpha 獨立 lr（比 actor 3e-4 低，緩慢調整）
   hidden_dim: 128               # P302 任務不需太大網路
   buffer_size: 100000
@@ -82,29 +88,33 @@ training:
   eval_episodes: 3              # 評估時跑 3 集取平均
   save_every: 100               # 每 100 集存 checkpoint
 
-  # ★ 啟用完整架構：SAC + SafetyNet + Conformal Risk Tube + OCC
-  variant: "sac_sn"             # sac / sac_sn / sac_sn_evi
+  # ★ v4: 純 SAC（不用 SafetyNet）
+  # 原因：P302 電池一步 ΔSoC=60%，SafetyNet 覆寫 99.8% 的動作，學不了
+  # Deployment 時再套 SafetyNet 做安全護欄
+  variant: "sac"                # sac / sac_sn / sac_sn_evi
 
   # Evidential 超參（variant=sac_sn_evi 時使用）
   lambda_evi: 0.001
   beta_risk: 0.5
 
-# ── SafetyNet（sac_sn / sac_sn_evi 模式使用）──────────────────
+# ── SafetyNet（僅 deployment 時使用）──────────────────────────
 safetynet:
   ramp_limit_kw: null
 
-# ── Conformal Prediction ─────────────────────────────────────
+# ── Conformal Prediction（純 SAC 模式下不影響訓練）──────────────
 conformal:
   window: 2880                  # 殘差窗口大小（≈5集的步數）
   delta: 0.1                    # 初始覆蓋率 = 1 - delta = 90%
 
 # ── Reward 調整 ─────────────────────────────────────────────
 reward:
-  realized_violation_penalty: 10.0     # 降低（SafetyNet 已攔住大部分違規）
-  attempted_violation_penalty: 0.01    # 大幅降低（每步都觸發會壓垮 reward）
-  safety_projection_penalty: 0.0005   # 降低（576步×0.001 = 0.576/集，太重）
+  # v4: 無 SafetyNet → 這些 penalty 不會生效
+  # 保留設定值供日後需要
+  realized_violation_penalty: 10.0
+  attempted_violation_penalty: 0.0
+  safety_projection_penalty: 0.0
 
-# ── Stress Testing（正式訓練先關閉，模型穩定後再開）───────────
+# ── Stress Testing（不使用）──────────────────────────────────
 stress:
   enable: false
 
