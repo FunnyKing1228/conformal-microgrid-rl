@@ -20,7 +20,7 @@ env:
   battery_capacity_kwh: 0.00007
   # 最大功率 20mA × 8.5V = 170mW ≈ 0.00017 kW
   battery_power_kw: 0.00017
-  battery_efficiency: 0.85       # 鋅空氣電池效率較低
+  battery_efficiency: 0.95       # 功率損耗 5%（不加噪音/lag 等 sim-to-real 設定）
 
   use_real_data: true
   # 使用處理好的 6 天 15 分鐘 CSV（相對於 core/ 目錄）
