@@ -16,6 +16,71 @@ except ImportError:
     print("Info: python-microgrid not installed. Running MicrogridEnvironment in python-microgrid synthetic mode.")
 
 
+# ══════════════════════════════════════════════════════════════════
+# 2026 台電夏月 TOU 電價（TWD/kWh）
+# ══════════════════════════════════════════════════════════════════
+def get_taipower_tou_price(hour: int, is_weekend: bool) -> float:
+    """
+    2026 Taipower Summer Time-of-Use electricity rate (TWD/kWh).
+    
+    Weekdays:
+      00:00 - 09:00  Off-Peak    2.06 TWD/kWh
+      09:00 - 16:00  Mid-Peak    4.69 TWD/kWh
+      16:00 - 22:00  Peak        7.13 TWD/kWh
+      22:00 - 24:00  Mid-Peak    4.69 TWD/kWh
+    
+    Weekends / Holidays:
+      All day                     2.06 TWD/kWh (flat, no arbitrage)
+    
+    Args:
+        hour: 0-23
+        is_weekend: True if Saturday(5) or Sunday(6), using Monday=0 convention
+    Returns:
+        Price in TWD/kWh
+    """
+    if is_weekend:
+        return 2.06
+    # Weekday TOU
+    if 0 <= hour < 9:
+        return 2.06   # Off-Peak
+    elif 9 <= hour < 16:
+        return 4.69   # Mid-Peak
+    elif 16 <= hour < 22:
+        return 7.13   # Peak
+    else:  # 22-24
+        return 4.69   # Mid-Peak (Late)
+
+
+def determine_situation_code(action_kw: float, net_load_after_pv: float) -> int:
+    """
+    判定 P302 能流情況碼（1~4）用於 Command.txt。
+    
+    前提：PV 已優先供負載，net_load_after_pv = max(0, load - pv)。
+    
+    情況碼：
+      1: Battery Solo  — 電池放電 ≥ 剩餘負載（市電=0）
+      2: Grid Support  — 電池放電 < 剩餘負載（市電補差額）
+      3: Grid Charge   — 市電供負載 + 充電池
+      4: Standby       — 電池不動作，市電供全部剩餘負載
+    
+    Args:
+        action_kw: 電池動作（kW），正=充電，負=放電
+        net_load_after_pv: PV 補完後的剩餘負載（kW）
+    Returns:
+        1, 2, 3, or 4
+    """
+    if action_kw < -1e-6:  # Discharge
+        discharge_kw = abs(action_kw)
+        if net_load_after_pv > 1e-6 and discharge_kw >= net_load_after_pv * 0.99:
+            return 1  # Battery Solo
+        else:
+            return 2  # Grid Support
+    elif action_kw > 1e-6:  # Charge
+        return 3  # Grid Charge
+    else:
+        return 4  # Standby
+
+
 class MicrogridEnvironment(gym.Env):
     """
     基於 python-microgrid 介面的微電網環境
@@ -99,6 +164,11 @@ class MicrogridEnvironment(gym.Env):
         flow_V_OCV_discharge: float = 5.6,    # V（放電時的開路電壓近似）
         # 額定電流
         flow_I_rated_A: float = 0.020,        # A（20 mA）
+        # ── TOU Reward Scale ────────────────────────────────────────────
+        # 因為 P302 電池極小（0.07 Wh），絕對套利利潤在微元級，
+        # 必須乘以大倍率讓 NN 梯度可學習。
+        # 預設 3000 使得單步 reward ≈ [-1, +1]
+        tou_reward_scale: float = 3000.0,
     ):
         super().__init__()
         
@@ -115,6 +185,7 @@ class MicrogridEnvironment(gym.Env):
         self.ramp_limit_kw = ramp_limit_kw  # 新增
         self.hard_guard = hard_guard
         self.allow_grid_trading = bool(allow_grid_trading)  # 是否允許電網交易
+        self.tou_reward_scale = float(tou_reward_scale)    # TOU 經濟 reward 倍率
         self.dataset_csv_path = dataset_csv_path
         self.dataset_pv_join_wind = bool(dataset_pv_join_wind)
         self.train_window_hours = int(train_window_hours) if train_window_hours is not None else None
@@ -221,6 +292,12 @@ class MicrogridEnvironment(gym.Env):
         self.soc_violations = 0
         self.action_violations = 0
         
+        # P302 能流追蹤（v6）
+        self._last_grid_kw = 0.0
+        self._last_net_load_after_pv = 0.0
+        self._last_useful_discharge = 0.0
+        self._last_pv_to_load = 0.0
+        
     def _init_microgrid(self, microgrid_id: int):
         """初始化微電網（若無 python-microgrid，啟用合成模式並視為已初始化）"""
         if not PYTHON_MICROGRID_AVAILABLE:
@@ -325,24 +402,29 @@ class MicrogridEnvironment(gym.Env):
             load = np.ones_like(pv) * float(self.dataset_load_kw)
             time_col = self.dataset_time_column or ('timestamp' if 'timestamp' in df.columns else None)
 
-        # Build price time series with same length as load
+        # Build price time series using 2026 Taipower TOU rates (TWD/kWh)
         N = int(len(load))
-        price = None
+        price = np.ones(N, dtype=float) * 2.06  # default off-peak
         try:
             if time_col and time_col in df.columns:
                 t = pd.to_datetime(df[time_col], errors='coerce')
-                # time-of-use: peak 8-18h, off-peak otherwise
-                hour = t.dt.hour.fillna(0).astype(int).values
-                base_price = 0.15
-                daily_factor = np.where((hour >= 8) & (hour <= 18), 1.2, 0.8)
-                price = np.clip(base_price * daily_factor, 0.05, None)
+                hours = t.dt.hour.fillna(0).astype(int).values
+                # day_of_week: Monday=0 … Sunday=6
+                dows = t.dt.dayofweek.fillna(0).astype(int).values
+                for i in range(N):
+                    is_wknd = (dows[i] >= 5)
+                    price[i] = get_taipower_tou_price(int(hours[i]), is_wknd)
+                print(f"  TOU pricing applied: Off={2.06}, Mid={4.69}, Peak={7.13} TWD/kWh")
             else:
-                # fallback: repeat 24h synthetic pattern
-                daily = self._generate_synthetic_prices()  # 24 length
-                reps = int(np.ceil(N / len(daily))) if len(daily) > 0 else 0
-                price = (np.tile(daily, reps)[:N] if reps > 0 else np.ones(N) * 0.15)
-        except Exception:
-            price = np.ones(N, dtype=float) * 0.15
+                # fallback: build TOU from step index (assume weekday)
+                steps_per_hour = max(1, int(round(1.0 / max(self.time_step, 1e-9)))) if self.time_step < 1.0 else 1
+                for i in range(N):
+                    h = int((i // steps_per_hour) % 24)
+                    day = int((i // (steps_per_hour * 24)) % 7)
+                    price[i] = get_taipower_tou_price(h, day >= 5)
+        except Exception as e:
+            print(f"  Warning: TOU pricing fallback to flat 2.06 TWD/kWh: {e}")
+            price = np.ones(N, dtype=float) * 2.06
         # Assign series
         self.load_data  = np.asarray(load,  dtype=float)
         self.pv_data    = np.asarray(pv,    dtype=float)
@@ -570,11 +652,10 @@ class MicrogridEnvironment(gym.Env):
         self.price_data = price_data
     
     def _generate_synthetic_prices(self):
-        """生成合成電價數據"""
+        """生成合成電價數據（2026 Taipower TOU, weekday pattern）"""
         hours = np.arange(24)
-        base_price = 0.15  # $/kWh
-        price_pattern = base_price + 0.05 * np.sin(2 * np.pi * (hours - 12) / 24) + 0.02 * np.random.randn(24)
-        return np.maximum(price_pattern, 0.05)
+        price_pattern = np.array([get_taipower_tou_price(int(h), False) for h in hours])
+        return price_pattern
     
     def _setup_spaces(self):
         """設置環境的狀態和動作空間
@@ -668,7 +749,8 @@ class MicrogridEnvironment(gym.Env):
         current_hour = int((step // steps_per_hour) % 24)
         current_day  = int((step // (steps_per_hour * 24)) % 7)
 
-        price_norm = float(np.clip(price / 0.5, 0.0, 1.0))
+        # TOU 電價正規化：max = 7.13 TWD → /10.0 使得 off=0.206, mid=0.469, peak=0.713
+        price_norm = float(np.clip(price / 10.0, 0.0, 1.0))
 
         # ── 標準 6 維 ─────────────────────────────────────────────────
         if not self.use_extended_obs:
@@ -1099,96 +1181,115 @@ class MicrogridEnvironment(gym.Env):
         
         return reward * self.reward_scaling
     
-    def _calculate_reward_no_grid_simplified(self, action: float, pv_kw: float, price: float) -> float:
+    def _calculate_reward_p302(self, action_kw: float, load_kw: float, pv_kw: float,
+                               price: float, net_load_after_pv: float,
+                               useful_discharge: float, charge_kw: float,
+                               grid_kw: float, baseline_grid_kw: float,
+                               pump_power_kw: float) -> float:
         """
-        P302 微型電池（SLFB 鋅空氣）專用 reward function
-        ================================================
+        P302 SLFB TOU Arbitrage Reward（v7）
+        ======================================
         
-        設計原則：
-        - 電池容量 0.07 Wh、功率 0.17 mW → 經濟套利無意義
-        - 核心目標：學會 SoC 管理（日間充、夜間放、維持中間值）
-        - 所有 reward 項目歸一化到 [-1, +1] 範圍，避免尺度爆炸
-        - 讓 agent 學到「充滿了就該放、放光了就該充」的直覺
+        設計原則（解決 Lazy Agent）：
+          1. 核心經濟信號：(baseline_cost - agent_cost) × REWARD_SCALE
+             因為電池極小（0.07 Wh），絕對利潤在微元級，必須放大。
+          2. 尖峰削峰（契約容量）：16:00-22:00 重賞放電、重罰充電
+          3. 週末保護：價格平坦 → 充放電只虧效率 → 鼓勵待機
+          4. SoC 安全：硬約束違規重罰（不用 SoC centering，避免鼓勵不動）
+        
+        移除項目（鼓勵 Lazy Agent 的元件）：
+          - ✗ SoC centering reward
+          - ✗ Action efficiency / smoothness penalty
+          - ✗ Throughput penalty
         
         Args:
-            action: 電池動作（kW），正數=充電，負數=放電
+            action_kw: 電池動作（kW），正=充電，負=放電
+            load_kw: 負載需求（kW）
             pv_kw: PV 發電（kW）
-            price: 電價（此版本主要作為時段指標）
+            price: 電價（TWD/kWh）
+            net_load_after_pv: PV 不足的剩餘負載（kW）
+            useful_discharge: 實際用於服務負載的放電量（kW）
+            charge_kw: 充電量（kW，由市電供應）
+            grid_kw: 市電實際需求（kW）
+            baseline_grid_kw: 無電池時的市電需求（kW）
+            pump_power_kw: 幫浦功耗（kW）
         """
         reward = 0.0
         soc = self.current_soc
         pmax = max(self.battery_power_kw, 1e-9)
-        action_norm = action / pmax  # [-1, +1]
+        dt = self.time_step
         
-        # ══════════════════════════════════════════════════════════
-        # 1. SoC 中心化獎勵（最重要！）— 二次函數，目標 0.5
-        #    SoC=0.5 → +0.3, SoC=0.1/0.9 → -0.18, SoC=0/1 → -0.45
-        # ══════════════════════════════════════════════════════════
-        soc_deviation = (soc - 0.5) ** 2  # 0~0.25
-        reward += 0.3 - 3.0 * soc_deviation  # +0.3 at center, -0.45 at edge
-        
-        # ══════════════════════════════════════════════════════════
-        # 2. 動作方向獎勵（SoC 高→鼓勵放電，SoC 低→鼓勵充電）
-        #    讓 agent 學會「該充就充、該放就放」
-        # ══════════════════════════════════════════════════════════
-        # soc > 0.6: 希望 action < 0 (放電)
-        # soc < 0.4: 希望 action > 0 (充電)
-        # soc 0.4~0.6: 兩者皆可
-        direction_signal = 0.0
-        if soc > 0.65:
-            # SoC 偏高 → 放電有獎、充電有罰
-            direction_signal = -action_norm * min(1.0, (soc - 0.5) * 4.0)
-        elif soc < 0.35:
-            # SoC 偏低 → 充電有獎、放電有罰
-            direction_signal = action_norm * min(1.0, (0.5 - soc) * 4.0)
-        reward += 0.3 * direction_signal
-        
-        # ══════════════════════════════════════════════════════════
-        # 3. PV 利用率（有陽光時充電更好）
-        # ══════════════════════════════════════════════════════════
-        if pv_kw > 0.1 * pmax and action > 0 and soc < 0.7:
-            pv_util = min(1.0, abs(action) / max(pv_kw, 1e-9))
-            reward += 0.15 * pv_util
-        
-        # ══════════════════════════════════════════════════════════
-        # 4. 時段策略（日間充電、夜間可放電）
-        # ══════════════════════════════════════════════════════════
-        steps_per_hour = max(1, int(round(1.0 / max(self.time_step, 1e-9)))) if self.time_step < 1.0 else 1
+        # 時間 context
+        steps_per_hour = max(1, int(round(1.0 / max(dt, 1e-9)))) if dt < 1.0 else 1
         hour = int((self.current_step // steps_per_hour) % 24)
-        
-        if 8 <= hour <= 16:  # 白天（PV 時段）
-            if action > 0 and soc < 0.7:
-                reward += 0.05  # 溫和鼓勵充電（但 SoC 高就不鼓勵）
-        elif 18 <= hour <= 23 or 0 <= hour <= 6:  # 夜間
-            if action < 0 and soc > 0.3:
-                reward += 0.05  # 溫和鼓勵放電
+        day = int((self.current_step // (steps_per_hour * 24)) % 7)
+        is_weekend = (day >= 5)  # Saturday=5, Sunday=6
+        is_peak_window = (16 <= hour < 22) and not is_weekend
+        is_offpeak = (0 <= hour < 9) and not is_weekend
         
         # ══════════════════════════════════════════════════════════
-        # 5. SoC 邊界強懲罰（硬約束信號）
+        # 1. 核心經濟信號（SCALED）
+        #    (Baseline_Cost - Agent_Cost) × tou_reward_scale
+        #    放電省貴電 → 正 reward；充電買便宜電 → 小負 reward
+        #    REWARD_SCALE ≈ 3000 使得單步 ≈ [-1, +1]
+        # ══════════════════════════════════════════════════════════
+        baseline_cost_twd = baseline_grid_kw * dt * price  # TWD
+        agent_cost_twd = grid_kw * dt * price              # TWD
+        economic_reward = (baseline_cost_twd - agent_cost_twd) * self.tou_reward_scale
+        reward += economic_reward
+        
+        # ══════════════════════════════════════════════════════════
+        # 2. 尖峰削峰（契約容量懲罰）16:00-22:00 weekday
+        #    重賞放電（減少市電尖峰用量）
+        #    重罰充電（用貴電充電 = 雙重浪費）
+        #    輕罰待機（有電不用 = 錯失良機）
+        # ══════════════════════════════════════════════════════════
+        if is_peak_window:
+            if action_kw < -0.05 * pmax and soc > 0.2:
+                reward += 1.0   # 尖峰放電 → 大獎勵
+            elif action_kw > 0.05 * pmax:
+                reward -= 1.0   # 尖峰充電 → 大懲罰
+            else:
+                reward -= 0.3   # 尖峰待機 → 小懲罰（錯失套利）
+        
+        # ══════════════════════════════════════════════════════════
+        # 3. 離峰充電鼓勵 00:00-09:00 weekday
+        #    電價最低，為白天放電做準備
+        # ══════════════════════════════════════════════════════════
+        if is_offpeak:
+            if action_kw > 0.05 * pmax and soc < 0.75:
+                reward += 0.5   # 離峰充電 → 中等獎勵
+            elif action_kw < -0.05 * pmax:
+                reward -= 0.3   # 離峰放電 → 浪費便宜電
+        
+        # ══════════════════════════════════════════════════════════
+        # 4. 週末 SoH 保護
+        #    價格平坦（2.06 全日），充放電只虧效率 → 鼓勵待機
+        # ══════════════════════════════════════════════════════════
+        if is_weekend and abs(action_kw) > 0.05 * pmax:
+            reward -= 0.5   # 週末不必要循環 → 懲罰
+        
+        # ══════════════════════════════════════════════════════════
+        # 5. SoC 安全懲罰（硬約束）
+        #    越界 → 重罰；不加 SoC centering（避免 Lazy Agent）
         # ══════════════════════════════════════════════════════════
         if soc < self.soc_min or soc > self.soc_max:
-            reward -= 2.0  # 越界重罰
-        elif soc > 0.85:
-            # 接近上限但還沒越界 → 漸進懲罰
-            reward -= 0.5 * ((soc - 0.85) / 0.05) ** 2
-        elif soc < 0.15:
-            # 接近下限
-            reward -= 0.5 * ((0.15 - soc) / 0.05) ** 2
+            reward -= 5.0   # 硬邊界違規
+        elif soc > 0.88:
+            reward -= 1.0 * ((soc - 0.85) / 0.05) ** 2  # 接近上界警告
+        elif soc < 0.12:
+            reward -= 1.0 * ((0.15 - soc) / 0.05) ** 2  # 接近下界警告
         
         # ══════════════════════════════════════════════════════════
-        # 6. 無意義動作懲罰（SoC 極端時仍往錯誤方向）
+        # 6. 放電超過負載 = 浪費（不可逆送市電）
         # ══════════════════════════════════════════════════════════
-        if soc > 0.8 and action > 0.1 * pmax:
-            reward -= 0.3  # SoC 很高還充 → 重罰
-        if soc < 0.2 and action < -0.1 * pmax:
-            reward -= 0.3  # SoC 很低還放 → 重罰
+        if action_kw < 0:
+            wasted = abs(action_kw) - useful_discharge
+            if wasted > 0.01 * pmax:
+                reward -= 0.5 * min(1.0, wasted / pmax)
         
-        # ══════════════════════════════════════════════════════════
-        # 7. 小幅 throughput 懲罰（防止無意義高頻充放）
-        # ══════════════════════════════════════════════════════════
-        reward -= 0.02 * abs(action_norm)
-        
-        return reward * self.reward_scaling
+        # 注意：不乘 self.reward_scaling（經濟信號已由 tou_reward_scale 放大）
+        return reward
     
     def reset(self, seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None) -> Tuple[np.ndarray, Dict[str, Any]]:
         """重置環境"""
@@ -1207,6 +1308,10 @@ class MicrogridEnvironment(gym.Env):
         self.soc_violations = 0
         self.action_violations = 0
         self.prev_action_kw = 0.0 # Reset previous action
+        self._last_grid_kw = 0.0
+        self._last_net_load_after_pv = 0.0
+        self._last_useful_discharge = 0.0
+        self._last_pv_to_load = 0.0
         self._prev_exec_action_kw = 0.0
         # Reset effective bounds with drift if stress
         if self.stress_enable and self.stress_bounds_drift_std > 0.0:
@@ -1433,33 +1538,66 @@ class MicrogridEnvironment(gym.Env):
                 0.0, 1.0
             ))
         
-        # 計算淨負載和電價
+        # ═══════════════════════════════════════════════════════════
+        # P302 正確能流模型（v6 修正）
+        # ─────────────────────────────────────────────────────────
+        # 能流優先順序：
+        #   1. PV → 負載（優先）
+        #   2. 電池放電 → 減少市電負擔（不可逆送）
+        #   3. 市電 → 補足剩餘負載 + 充電池
+        # ═══════════════════════════════════════════════════════════
         load_kw = self.episode_data['load'][self.current_step]
         pv_kw = self.episode_data['pv'][self.current_step]
         price = self.episode_data['price'][self.current_step]
         
-        # 使用 net_power（扣除幫浦功耗）計算淨負載
-        net_load = load_kw - pv_kw + net_power_kw
+        # PV 先供負載
+        pv_to_load = min(pv_kw, load_kw)
+        net_load_after_pv = max(0.0, load_kw - pv_kw)  # PV 不足的部分
         
-        # 計算財務指標（以淨功率計算）
-        if net_power_kw < 0:  # 放電（賣電）
-            revenue = abs(net_power_kw) * self.time_step * price
-            cost = 0.0
-        else:  # 充電（買電）
-            revenue = 0.0
-            cost = net_power_kw * self.time_step * price
-        # 幫浦運行成本（額外電費）
-        pump_cost = pump_power_kw * self.time_step * price
-        cost += pump_cost
+        # 電池動作影響（net_power_kw 已扣除幫浦功耗）
+        # net_power_kw > 0 → 充電（從市電買）, < 0 → 放電（減少市電）
+        if net_power_kw < 0:  # 放電
+            discharge_kw = abs(net_power_kw)
+            # 放電量不能超過剩餘負載（不可逆送市電）
+            useful_discharge = min(discharge_kw, net_load_after_pv)
+            charge_kw = 0.0
+        else:  # 充電或待機
+            useful_discharge = 0.0
+            charge_kw = net_power_kw  # 充電需要市電
         
-        self.total_revenue += revenue
-        self.total_cost += cost
+        # 市電實際需求 = 剩餘負載 - 有效放電 + 充電 + 幫浦
+        grid_kw = net_load_after_pv - useful_discharge + charge_kw + pump_power_kw
+        grid_kw = max(0.0, grid_kw)
         
-        # 計算獎勵（根據是否允許電網交易選擇不同版本）
+        # 基線市電（無電池時的市電需求）
+        baseline_grid_kw = net_load_after_pv + pump_power_kw
+        
+        # 財務指標：市電成本（P302 不能賣電，所以 revenue = 省下的市電費）
+        grid_cost = grid_kw * self.time_step * price
+        baseline_cost = baseline_grid_kw * self.time_step * price
+        grid_savings = baseline_cost - grid_cost  # 正=省錢, 負=多花（充電）
+        
+        self.total_revenue += max(0.0, grid_savings)  # "收益" = 省市電
+        self.total_cost += grid_cost                   # 實際市電成本
+        
+        # 保存能流資訊供 info 使用
+        self._last_grid_kw = grid_kw
+        self._last_net_load_after_pv = net_load_after_pv
+        self._last_useful_discharge = useful_discharge
+        self._last_pv_to_load = pv_to_load
+        
+        # 計算獎勵（P302 正確能流版本）
         if self.allow_grid_trading:
+            # 舊版雙向電網 reward（保留相容性）
+            net_load = load_kw - pv_kw + net_power_kw
             reward = self._calculate_reward_phase1(action_kw, net_load, price)
         else:
-            reward = self._calculate_reward_no_grid_simplified(action_kw, pv_kw, price)
+            # P302 正確能流 reward
+            reward = self._calculate_reward_p302(
+                action_kw, load_kw, pv_kw, price,
+                net_load_after_pv, useful_discharge, charge_kw,
+                grid_kw, baseline_grid_kw, pump_power_kw,
+            )
         
         # ── Flow Rate 獎勵調整 ─────────────────────────────────────
         if self.use_flow_rate_action:
@@ -1478,6 +1616,9 @@ class MicrogridEnvironment(gym.Env):
             penalty_per_kwh = float(getattr(self, 'realized_violation_penalty', 20.0))
             scale_guard = max(float(self.reward_scaling), 1e-9)
             reward -= (penalty_per_kwh * energy_violate_kwh) / scale_guard
+        
+        # ── 情況碼（Scenario 1~4）──────────────────────────────────
+        situation_code = determine_situation_code(action_kw, net_load_after_pv)
         
         # 更新狀態
         self.current_step += 1
@@ -1501,13 +1642,18 @@ class MicrogridEnvironment(gym.Env):
             'net_power_kw': net_power_kw,
             'gross_power_kw': applied_action_kw,
             'R_eq_ohm': self._equivalent_resistance(flow_action) if self.use_flow_rate_action else 0.0,
-            'net_load': net_load,
+            'net_load_after_pv': self._last_net_load_after_pv,
+            'grid_kw': self._last_grid_kw,
+            'useful_discharge': self._last_useful_discharge,
+            'pv_to_load': self._last_pv_to_load,
+            'baseline_grid_kw': baseline_grid_kw,
             'price': price,
+            'situation_code': situation_code,
             'step': self.current_step,
             'load': load_kw,
             'pv': pv_kw,
             'action_kw': action_kw,
-            'applied_action_kw': applied_action_kw
+            'applied_action_kw': applied_action_kw,
         }
         
         # 更新觀測 SoC 緩衝

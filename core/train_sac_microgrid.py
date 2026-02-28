@@ -146,6 +146,8 @@ def create_environment(config: Dict[str, Any]) -> MicrogridEnvironment:
         battery_efficiency=env_config.get('battery_efficiency', 0.95),
         # ── 擴充觀察空間 ─────────────────────────────────────
         use_extended_obs=env_config.get('use_extended_obs', False),
+        # ── TOU Reward Scale ─────────────────────────────────
+        tou_reward_scale=env_config.get('tou_reward_scale', 3000.0),
         **stress_kwargs
     )
     # 將 SafetyNet 的 ramp 參數掛在 env 上，供訓練與評估共用
@@ -301,6 +303,8 @@ def train_sac_with_microgrid(
         soc_trajectory = [state[0]]  # First element is SoC
         episode_revenue = 0.0
         episode_cost = 0.0
+        # Scenario (situation code) distribution per episode
+        sit_counts = {1: 0, 2: 0, 3: 0, 4: 0}
         # 每集KPI累積器
         attempted_count = 0
         projected_count = 0
@@ -442,9 +446,14 @@ def train_sac_with_microgrid(
  
             # Remove duplicate per-episode penalty application; shaping already applied above when enabled
 
-            # Update financial metrics
-            episode_revenue += step_info.get('total_revenue', 0)
-            episode_cost += step_info.get('total_cost', 0)
+            # Update financial metrics（取環境累積值，非逐步加總）
+            episode_revenue = step_info.get('total_revenue', 0)
+            episode_cost = step_info.get('total_cost', 0)
+            
+            # Track situation codes (1-4)
+            sit = int(step_info.get('situation_code', 4))
+            if sit in sit_counts:
+                sit_counts[sit] += 1
             
             if done:
                 break
@@ -496,6 +505,10 @@ def train_sac_with_microgrid(
             'conformal_delta': f'{current_conformal_delta:.4f}',
             'proj_penalty_mult': f'{projected_penalty_mult:.3f}',
             'alpha': f'{current_alpha:.4f}',
+            'sit1_solo': sit_counts.get(1, 0),
+            'sit2_grid_sup': sit_counts.get(2, 0),
+            'sit3_charge': sit_counts.get(3, 0),
+            'sit4_standby': sit_counts.get(4, 0),
         })
 
         # 自適應調整：根據本集 realized 調整 conformal delta 與投影懲罰倍率
@@ -568,6 +581,8 @@ def train_sac_with_microgrid(
                   f"| {elapsed/60:.1f}min elapsed | ETA {eta_sec/60:.1f}min ──")
             print(f"   Reward(avg{n_back})={avg_reward:8.2f}  "
                   f"Violations: att={avg_attempted:.1f} proj={avg_projected:.1f} real={avg_realized:.1f}")
+            print(f"   Scenarios[last]: S1={sit_counts[1]} S2={sit_counts[2]} "
+                  f"S3={sit_counts[3]} S4={sit_counts[4]}")
             print(f"   SoC[last]: {soc_last.min():.3f}~{soc_last.max():.3f} "
                   f"(mean={soc_last.mean():.3f}, end={soc_last[-1]:.3f})")
             print(f"   Revenue=${avg_revenue:.4f}  Cost=${avg_cost:.4f}  "
@@ -686,14 +701,15 @@ def evaluate_microgrid_agent(agent: SACAgent, env: MicrogridEnvironment, n_episo
             current_soc_violations_cum = int(info.get('soc_violations', 0))
             episode_violations += max(0, current_soc_violations_cum - prev_soc_violations_cum)
             prev_soc_violations_cum = current_soc_violations_cum
-            episode_revenue += info.get('total_revenue', 0)
-            episode_cost += info.get('total_cost', 0)
+            # 取環境累積值（非逐步加總）
+            episode_revenue = info.get('total_revenue', 0)
+            episode_cost = info.get('total_cost', 0)
             
             if done:
                 break
                 
             state = next_state
- 
+
         # 釋放固定起點，避免影響下一回合訓練
         try:
             if hasattr(env, 'fixed_start_idx'):

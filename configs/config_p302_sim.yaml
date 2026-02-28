@@ -1,15 +1,18 @@
 # ═══════════════════════════════════════════════════════════════════
-# P302 SLFB 鋅空氣電池 ── 正式模擬訓練配置 v5 (Curriculum)
+# P302 SLFB 鋅空氣電池 ── 正式模擬訓練配置 v7 (TOU Arbitrage)
 # 架構: CORAL 三層式安全 RL（CRTSN + OCC + Adaptive Loop）
 # ─────────────────────────────────────────────────────────────────
-# v5 修正：
-#   - v4 純 SAC 訓練成功（reward=168, SoC_mean=0.50），但 OCC 完全
-#     沒有學到東西（delta_kw=0），等於不是 CORAL
-#   - 解法：Curriculum 訓練
-#     Phase 1 (EP 0~299): 純 SAC，學會基本 SoC 管理
-#     Phase 2 (EP 300~1999): SAC + CRTSN + OCC + Adaptive Loop
-#     因為 agent 已學會用小動作控制，SafetyNet 不會覆寫 99.8% 步驟
-#   - alpha clamp 保持 [-5, 0]（max alpha=1.0，防爆炸）
+# v7 修正（重大）：
+#   - 導入 2026 台電夏月 TOU 真實費率（尖峰 7.13/半尖峰 4.69/離峰 2.06 TWD/kWh）
+#   - 週末全日 2.06 TWD（無套利空間 → 鼓勵待機）
+#   - Reward 完全重寫：
+#     · 核心 = (Baseline_Cost - Agent_Cost) × tou_reward_scale（經濟信號放大）
+#     · 尖峰 16-22 放電 → +1.0 bonus / 充電 → -1.0 penalty
+#     · 離峰 00-09 充電 → +0.5 bonus
+#     · 週末充放電 → -0.5 penalty (SoH 保護)
+#     · 移除 SoC centering / action efficiency (消除 Lazy Agent)
+#   - 4 Scenario 能流情況碼 (1=Battery Solo, 2=Grid Support, 3=Grid Charge, 4=Standby)
+#   - 沿用 v6 正確能流模型（PV→Load 優先、Grid 單向）
 # ═══════════════════════════════════════════════════════════════════
 
 random_seed: 42
@@ -38,13 +41,20 @@ env:
   # CSV 欄位映射
   dataset_time_column: "timestamp"
 
-  # P302 電池太小（0.07Wh），電網套利無意義
-  # 使用 no-grid reward → 聚焦 SoC 管理 + PV 利用
+  # P302 市電單向：可買不可逆送
+  # PV→負載優先，市電補足剩餘負載+充電池，電池放電減少市電依賴
   allow_grid_trading: false
 
   # 無 ramp limit（電池功率已很小，且不用 sim-to-real 噪音）
   ramp_limit_kw: null
   hard_guard: false
+
+  # ── TOU Reward Scale（關鍵參數）─────────────────────────────────
+  # 因為 P302 電池極小（0.07 Wh），絕對套利利潤在微元級。
+  # 必須乘以大倍率讓 NN 梯度可學習。
+  # 計算：max savings/step = 0.00017kW × 0.25h × 7.13TWD = 0.000303 TWD
+  # 3000 × 0.000303 ≈ 0.91 → 單步 reward ≈ [-1, +1] ✓
+  tou_reward_scale: 3000
 
   # ── Flow Rate 電化學等效模型（SLFB 鋅空氣電池）────────────────────
   # 啟用 2D action space: [power_kw, flow_fraction]
@@ -90,7 +100,7 @@ training:
   save_every: 100               # 每 100 集存 checkpoint
 
   # ★ v5: CORAL Curriculum 訓練
-  # Phase 1 (EP 0~299): 純 SAC — agent 先學基本 SoC 管理
+  # Phase 1 (EP 0~299): 純 SAC — agent 先學基本 TOU 套利
   # Phase 2 (EP 300~1999): SAC + CRTSN + OCC + Adaptive — 三層全開
   variant: "sac_sn"
   safetynet_warmup_episodes: 300
