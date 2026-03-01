@@ -914,14 +914,18 @@ class MicrogridEnvironment(gym.Env):
             # 放電：幫浦消耗部分輸出，淨輸出減少
             return gross_power_W + P_pump  # gross_power_W 是負的，所以 +P_pump 使其更接近 0
 
-    def _update_battery_soc(self, action: float) -> float:
-        """更新電池SoC"""
+    def _update_battery_soc(self, action: float):
+        """更新電池SoC，回傳 (new_soc, actual_action_kw)。
+        
+        當 SoC 觸及邊界時，反算實際可行功率以維持能量守恆，
+        避免下游能流計算（grid_kw, cost 等）產生誤差累積。
+        """
         # Convert action from kW to kWh using effective dt
         dt_eff = float(getattr(self, '_effective_time_step', self.time_step))
-        energy_change_kwh = action * dt_eff
-        
-        # Apply efficiency
         eta_eff = float(getattr(self, '_effective_efficiency', self.battery_efficiency))
+        
+        energy_change_kwh = action * dt_eff
+        # Apply efficiency
         if energy_change_kwh > 0:  # Charging
             energy_change_kwh *= eta_eff
         else:  # Discharging
@@ -931,17 +935,29 @@ class MicrogridEnvironment(gym.Env):
         # Update SoC
         new_soc = self.current_soc + energy_change_kwh / self.battery_capacity_kwh
         
-        # Check bounds
+        # Check bounds — 若越界則反算實際可行功率
         low = float(getattr(self, 'soc_min_eff', self.soc_min))
         high = float(getattr(self, 'soc_max_eff', self.soc_max))
+        actual_action_kw = action  # 預設 = 原始動作
+        
         if new_soc < low:
             self.soc_violations += 1
+            # 反算：實際只能放電到 low
+            actual_energy_kwh = (low - self.current_soc) * self.battery_capacity_kwh
+            # actual_energy_kwh < 0（放電），還原效率：E_action = E_actual * eta
+            if dt_eff > 1e-9:
+                actual_action_kw = actual_energy_kwh * eta_eff / dt_eff
             new_soc = low
         elif new_soc > high:
             self.soc_violations += 1
+            # 反算：實際只能充電到 high
+            actual_energy_kwh = (high - self.current_soc) * self.battery_capacity_kwh
+            # actual_energy_kwh > 0（充電），還原效率：E_action = E_actual / eta
+            if dt_eff > 1e-9 and eta_eff > 1e-9:
+                actual_action_kw = actual_energy_kwh / (dt_eff * eta_eff)
             new_soc = high
         
-        return new_soc
+        return new_soc, actual_action_kw
 
     def predict_soc_raw(self, soc: float, action: float) -> float:
         """以環境參數預估下一步 SoC（不夾限、不記違規）。
@@ -1525,21 +1541,28 @@ class MicrogridEnvironment(gym.Env):
             action_kw = float(np.clip(action_kw, -self.battery_power_kw, self.battery_power_kw))
             soc_next_raw = float(self.predict_soc_raw(old_soc, action_kw))
 
-        self.current_soc = self._update_battery_soc(applied_action_kw)
+        self.current_soc, actual_action_kw = self._update_battery_soc(applied_action_kw)
         self._prev_exec_action_kw = applied_action_kw
         # 更新 flow rate（轉換為 L/min 供 info 使用；假設 100% = 20 L/min）
         self.current_flow_rate_lpm = flow_action * 20.0
 
-        # ── SoH 衰減（每步根據吞吐量計算）──────────────────────────
+        # ── 用實際功率重算淨功率（確保 SoC clamp 後能量守恆）───────
+        # 若 SoC 觸邊被 clamp，actual_action_kw ≠ applied_action_kw
+        if self.use_flow_rate_action:
+            actual_net_power_kw = self._net_power_W(actual_action_kw * 1000.0, flow_action) / 1000.0
+        else:
+            actual_net_power_kw = actual_action_kw
+
+        # ── SoH 衰減（每步根據實際吞吐量計算）─────────────────────
         if self.soh_degradation_per_kwh > 0.0:
-            throughput_kwh = abs(applied_action_kw) * float(self._effective_time_step)
+            throughput_kwh = abs(actual_action_kw) * float(self._effective_time_step)
             self.current_soh = float(np.clip(
                 self.current_soh - self.soh_degradation_per_kwh * throughput_kwh,
                 0.0, 1.0
             ))
         
         # ═══════════════════════════════════════════════════════════
-        # P302 正確能流模型（v6 修正）
+        # P302 正確能流模型（v8 修正：使用 actual_net_power_kw）
         # ─────────────────────────────────────────────────────────
         # 能流優先順序：
         #   1. PV → 負載（優先）
@@ -1554,16 +1577,16 @@ class MicrogridEnvironment(gym.Env):
         pv_to_load = min(pv_kw, load_kw)
         net_load_after_pv = max(0.0, load_kw - pv_kw)  # PV 不足的部分
         
-        # 電池動作影響（net_power_kw 已扣除幫浦功耗）
-        # net_power_kw > 0 → 充電（從市電買）, < 0 → 放電（減少市電）
-        if net_power_kw < 0:  # 放電
-            discharge_kw = abs(net_power_kw)
+        # 電池動作影響（actual_net_power_kw 已扣除幫浦功耗且反映 SoC clamp）
+        # actual_net_power_kw > 0 → 充電（從市電買）, < 0 → 放電（減少市電）
+        if actual_net_power_kw < 0:  # 放電
+            discharge_kw = abs(actual_net_power_kw)
             # 放電量不能超過剩餘負載（不可逆送市電）
             useful_discharge = min(discharge_kw, net_load_after_pv)
             charge_kw = 0.0
         else:  # 充電或待機
             useful_discharge = 0.0
-            charge_kw = net_power_kw  # 充電需要市電
+            charge_kw = actual_net_power_kw  # 充電需要市電
         
         # 市電實際需求 = 剩餘負載 - 有效放電 + 充電 + 幫浦
         grid_kw = net_load_after_pv - useful_discharge + charge_kw + pump_power_kw
