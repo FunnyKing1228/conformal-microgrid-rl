@@ -107,9 +107,13 @@ LOAD_SCHEDULE = [
     (dtime(21, 0), 0), (dtime(22, 0), 0), (dtime(23, 0), 0),
 ]
 
-# TOU 電價
-BASE_PRICE = 0.15
-PEAK_HOURS = (8, 18)
+# ── 2026 台電夏季 TOU 電價 (TWD/kWh) ──────────────────────────
+# 平日：離峰 00-09 = 2.06, 半尖峰 09-16 = 4.69,
+#        尖峰 16-22 = 7.13, 晚半尖峰 22-24 = 4.69
+# 週末/假日：全天 2.06（無套利空間）
+TOU_OFFPEAK  = 2.06   # TWD/kWh
+TOU_MIDPEAK  = 4.69
+TOU_PEAK     = 7.13
 
 
 def get_load_groups(t: dtime) -> int:
@@ -121,11 +125,29 @@ def get_load_groups(t: dtime) -> int:
     return result
 
 
-def get_tou_price(hour: int) -> float:
-    """TOU 電價模型"""
-    if PEAK_HOURS[0] <= hour <= PEAK_HOURS[1]:
-        return BASE_PRICE * 1.2
-    return BASE_PRICE * 0.8
+def get_tou_price(hour: int, day_of_week: int = 0) -> float:
+    """
+    2026 台電夏季 TOU 電價。
+    
+    Args:
+        hour: 0~23
+        day_of_week: 0=Mon ... 6=Sun
+    
+    Returns:
+        電價 (TWD/kWh)
+    """
+    # 週末全天離峰
+    if day_of_week >= 5:  # Sat=5, Sun=6
+        return TOU_OFFPEAK
+    # 平日
+    if hour < 9:
+        return TOU_OFFPEAK      # 00:00 - 09:00
+    elif hour < 16:
+        return TOU_MIDPEAK      # 09:00 - 16:00
+    elif hour < 22:
+        return TOU_PEAK         # 16:00 - 22:00
+    else:
+        return TOU_MIDPEAK      # 22:00 - 24:00
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -241,38 +263,53 @@ class DataBuffer:
 
 
 # ══════════════════════════════════════════════════════════════════
-# SoC 自計算（庫倫計數法）
+# SoC 自計算（庫倫計數法 — Coulomb Counting, Ah 基準）
 # ══════════════════════════════════════════════════════════════════
 class SoCTracker:
     """
-    基於庫倫計數的 SoC 追蹤器。
+    基於庫倫計數 (Ah) 的 SoC 追蹤器。
     
-    不依賴韌體 SoC，使用電池電流/電壓自行估算。
+    不依賴韌體 SoC，使用電池電流自行估算。
     
-    公式：ΔSoC = (I × Δt × η) / Capacity
-    - 充電 (I > 0): η = efficiency
-    - 放電 (I < 0): η = 1/efficiency
+    方法：標準庫倫積分（只積電流，不乘電壓）
+        ΔSoC = (I_ma × Δt_h × η_coulombic) / capacity_mah
+    
+    效率定義：
+        BATTERY_EFFICIENCY = 0.85 → Round-Trip Efficiency (RTE)
+        單向庫倫效率 η = √(RTE) ≈ 0.922
+        - 充電 (I > 0): 存入電荷 = 量測電荷 × η（化學轉換損耗）
+        - 放電 (I < 0): 取出電荷 = 量測電荷 / η（內阻損耗）
+    
+    注意：
+        - voltage_v 參數保留但僅用於統計/日誌，不參與 SoC 計算
+        - 若需要「能量法 SoC」（考慮電壓變化），請使用 SoCTrackerEnergy
     """
+
+    # 長斷線處理：超過此秒數仍會計算，但會 clamp 到此上限
+    MAX_INTEGRATION_SEC = 3600.0  # 1 小時
 
     def __init__(self, initial_soc: float = 0.5,
                  capacity_mah: float = BATTERY_CAPACITY_MAH,
-                 efficiency: float = BATTERY_EFFICIENCY):
+                 efficiency_rte: float = BATTERY_EFFICIENCY):
         self.soc = initial_soc
         self.capacity_mah = capacity_mah
-        self.capacity_wh = BATTERY_CAPACITY_WH
-        self.efficiency = efficiency
+        # 單向庫倫效率 = sqrt(RTE)
+        self.eta = float(np.sqrt(max(efficiency_rte, 0.01)))
         self.last_update: Optional[datetime] = None
-        self.total_charge_mwh = 0.0
-        self.total_discharge_mwh = 0.0
 
-    def update(self, timestamp: datetime, current_ma: float, voltage_v: float):
+        # 統計用
+        self.total_charge_mah = 0.0
+        self.total_discharge_mah = 0.0
+        self.skipped_intervals = 0  # 被截斷/跳過的異常間隔計數
+
+    def update(self, timestamp: datetime, current_ma: float, voltage_v: float = 0.0):
         """
-        根據電流與時間更新 SoC。
+        根據電流與時間更新 SoC（標準庫倫計數）。
         
         Args:
             timestamp: 當前時間
             current_ma: 電池電流 (mA)，正=充電, 負=放電
-            voltage_v: 電池電壓 (V)
+            voltage_v: 電池電壓 (V)，僅記錄用，不影響 SoC 計算
         """
         if self.last_update is None:
             self.last_update = timestamp
@@ -281,28 +318,34 @@ class SoCTracker:
         dt_sec = (timestamp - self.last_update).total_seconds()
         self.last_update = timestamp
 
-        if dt_sec <= 0 or dt_sec > 600:  # 跳過異常間隔
+        # 時間倒退：跳過
+        if dt_sec <= 0:
             return
 
+        # 長斷線處理：仍然計算，但截斷到上限（避免 sensor 累積偏差放大）
+        if dt_sec > self.MAX_INTEGRATION_SEC:
+            self.skipped_intervals += 1
+            dt_sec = self.MAX_INTEGRATION_SEC  # 截斷而非丟棄
+
         dt_h = dt_sec / 3600.0
-        power_mw = current_ma * voltage_v  # mA × V = mW
+
+        # 庫倫積分 (mAh) — 只看電流，不乘電壓
+        delta_mah_raw = current_ma * dt_h  # mA × h = mAh
 
         if current_ma > 0:
-            # 充電
-            energy_mwh = power_mw * dt_h * self.efficiency
-            self.total_charge_mwh += energy_mwh
+            # 充電：實際存入 = 量測 × η（部分能量損耗於化學轉換）
+            effective_mah = delta_mah_raw * self.eta
+            self.total_charge_mah += effective_mah
         elif current_ma < 0:
-            # 放電
-            energy_mwh = abs(power_mw) * dt_h / self.efficiency
-            self.total_discharge_mwh += energy_mwh
-            energy_mwh = -energy_mwh
+            # 放電：實際減少 = 量測 / η（內阻使內部消耗 > 外部量測）
+            effective_mah = delta_mah_raw / self.eta  # 負值
+            self.total_discharge_mah += abs(effective_mah)
         else:
-            energy_mwh = 0.0
+            effective_mah = 0.0
 
-        # mWh → SoC 增量
-        capacity_mwh = self.capacity_wh * 1000  # Wh → mWh
-        if capacity_mwh > 0:
-            delta_soc = energy_mwh / capacity_mwh
+        # 更新 SoC
+        if self.capacity_mah > 0:
+            delta_soc = effective_mah / self.capacity_mah
             self.soc = float(np.clip(self.soc + delta_soc, 0.0, 1.0))
 
     def update_from_buffer(self, readings: List[Reading]):
@@ -316,6 +359,16 @@ class SoCTracker:
     def set_soc(self, soc: float):
         """外部校正 SoC（例如從已知狀態重置）"""
         self.soc = float(np.clip(soc, 0.0, 1.0))
+
+    def get_stats(self) -> Dict[str, float]:
+        """回傳統計資訊"""
+        return {
+            'soc': self.soc,
+            'total_charge_mah': self.total_charge_mah,
+            'total_discharge_mah': self.total_discharge_mah,
+            'skipped_intervals': self.skipped_intervals,
+            'eta_coulombic': self.eta,
+        }
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -347,9 +400,9 @@ def build_state_from_aggregation(
     load_w = load_groups * LOAD_PER_GROUP_W
     load_kw = load_w / 1000.0
 
-    # 電價
-    price = get_tou_price(now.hour)
-    price_norm = float(np.clip(price / 0.5, 0.0, 1.0))
+    # 電價（2026 台電 TOU）
+    price = get_tou_price(now.hour, now.weekday())
+    price_norm = float(np.clip(price / 10.0, 0.0, 1.0))  # 正規化：7.13 TWD → ~0.71
 
     # 時間特徵
     hour = float(now.hour)

@@ -80,11 +80,27 @@ def pick_first_battery(ids: Dict[str, Tuple[datetime, float, float, float, float
 	return candidates[0]
 
 
+def _get_tou_price(hour: int, day_of_week: int) -> float:
+	"""2026 台電夏季 TOU 電價 (TWD/kWh)，與訓練環境一致。"""
+	if day_of_week >= 5:  # 週末全天離峰
+		return 2.06
+	if hour < 9:
+		return 2.06    # 離峰
+	elif hour < 16:
+		return 4.69    # 半尖峰
+	elif hour < 22:
+		return 7.13    # 尖峰
+	else:
+		return 4.69    # 晚半尖峰
+
+
 def build_agent_state(status: Dict[str, Tuple[datetime, float, float, float, float]], price: float, fallback_batt_id: str = "B01") -> Optional[Tuple[np.ndarray, datetime, str]]:
 	"""
 	將元件狀態對映為 SAC agent 所需狀態：
-	state = [soc(0..1), load_kw, pv_kw, price, hour, day_of_week]
+	state = [soc(0..1), load_kw, pv_kw, price_norm, hour, day_of_week]
 	回傳 (state_vec, ts_ref, battery_id)
+	
+	注意：price 參數現已忽略，改用動態 TOU 電價（與訓練環境一致）。
 	"""
 	# 選擇電池
 	bpick = status.get(f"B{int(fallback_batt_id[-2:]):02d}", None)
@@ -118,7 +134,11 @@ def build_agent_state(status: Dict[str, Tuple[datetime, float, float, float, flo
 	hour = float(dt.hour)
 	day_of_week = float(dt.weekday())  # 0..6
 
-	state = np.array([soc_frac, load_kw, pv_kw, float(price), hour, day_of_week], dtype=np.float32)
+	# 電價正規化：使用 2026 台電 TOU，/10 正規化（與訓練環境 microgrid_env.py 一致）
+	tou_price = _get_tou_price(int(dt.hour), int(dt.weekday()))
+	price_norm = float(np.clip(tou_price / 10.0, 0.0, 1.0))
+
+	state = np.array([soc_frac, load_kw, pv_kw, price_norm, hour, day_of_week], dtype=np.float32)
 	return state, ts_ref, bid
 
 
