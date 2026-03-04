@@ -186,8 +186,8 @@ def main():
                         help='Battery PP ID (default: 01)')
     parser.add_argument('--load-count', type=int, default=4,
                         help='Load groups (0-4, default: 4)')
-    parser.add_argument('--poll-sec', type=float, default=1.0,
-                        help='Command.txt update interval (sec, default: 1)')
+    parser.add_argument('--poll-sec', type=float, default=10.0,
+                        help='Read Data.txt + write CSV interval (sec, default: 10)')
     parser.add_argument('--log-dir', type=str, default='.',
                         help='CSV log output directory')
     parser.add_argument('--scenario', type=int, default=4, choices=[1, 2, 3, 4],

@@ -399,7 +399,7 @@ class AIControlGUI(tk.Tk):
         ttk.Label(row_poll, text="Data.txt 輪詢 (秒):").pack(side="left")
         self.poll_sec_var = tk.StringVar(value=str(self.config.get("poll_sec", 10.0)))
         ttk.Entry(row_poll, textvariable=self.poll_sec_var, width=8).pack(side="left", padx=4)
-        ttk.Label(row_poll, text="(AI=10s, 太陽能測試=1s)").pack(side="left")
+        ttk.Label(row_poll, text="(所有模式共用，預設 10 秒)").pack(side="left")
 
         # 日誌目錄
         row_log = ttk.Frame(frm_common)
@@ -591,6 +591,7 @@ class AIControlGUI(tk.Tk):
     def _build_solar_cmd(self, data_file, command_file, pp, load_count):
         """建構太陽能測試命令"""
         log_dir = self.log_dir_var.get() or os.path.join(PROJECT_ROOT, "results", "solar_test")
+        poll_sec = self.poll_sec_var.get() or "10"
 
         if getattr(sys, 'frozen', False):
             exe_dir = os.path.dirname(sys.executable)
@@ -609,7 +610,7 @@ class AIControlGUI(tk.Tk):
             "--battery-pp", pp,
             "--load-count", str(load_count),
             "--scenario", "4",
-            "--poll-sec", "1",
+            "--poll-sec", str(poll_sec),
             "--log-dir", os.path.normpath(log_dir),
         ]
 
@@ -618,6 +619,7 @@ class AIControlGUI(tk.Tk):
     def _build_standby_cmd(self, data_file, command_file, pp, load_count):
         """建構待機命令（重用 solar_test_collect.py）"""
         log_dir = self.log_dir_var.get() or os.path.join(PROJECT_ROOT, "results", "standby")
+        poll_sec = self.poll_sec_var.get() or "10"
 
         if getattr(sys, 'frozen', False):
             exe_dir = os.path.dirname(sys.executable)
@@ -636,7 +638,7 @@ class AIControlGUI(tk.Tk):
             "--battery-pp", pp,
             "--load-count", str(load_count),
             "--scenario", "4",
-            "--poll-sec", "1",
+            "--poll-sec", str(poll_sec),
             "--log-dir", os.path.normpath(log_dir),
         ]
 
