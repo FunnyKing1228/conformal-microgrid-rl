@@ -194,13 +194,8 @@ def main():
                         help='Scenario code (default: 4=Standby)')
     args = parser.parse_args()
 
-    # CSV log
-    os.makedirs(args.log_dir, exist_ok=True)
-    date_str = datetime.now().strftime('%Y%m%d_%H%M%S')
-    csv_path = os.path.join(args.log_dir, f'collected_data_{date_str}.csv')
-
     # CSV 格式與舊版 DataCollector 相容
-    csv_header = [
+    CSV_HEADER = [
         'timestamp',           # 時間戳
         'battery_id',          # 電池 ID
         'soc_percent',         # SoC (%)
@@ -219,9 +214,26 @@ def main():
         'data_txt_ts',         # Data.txt 原始時間戳 (bonus)
         'elapsed_sec',         # 累計秒數 (bonus)
     ]
-    csv_file = open(csv_path, 'w', newline='', encoding='utf-8-sig')
-    csv_writer = csv.DictWriter(csv_file, fieldnames=csv_header)
-    csv_writer.writeheader()
+
+    os.makedirs(args.log_dir, exist_ok=True)
+
+    # --- 依日期開檔：存在就 append，不存在就新建 + 寫 header ---
+    def open_csv_for_date(date_str):
+        """開啟或建立指定日期的 CSV，回傳 (file, writer, path)"""
+        path = os.path.join(args.log_dir, f'collected_data_{date_str}.csv')
+        if os.path.exists(path):
+            f = open(path, 'a', newline='', encoding='utf-8-sig')
+            w = csv.DictWriter(f, fieldnames=CSV_HEADER)
+            print(f'  [CSV] 接續寫入: {path}')
+        else:
+            f = open(path, 'w', newline='', encoding='utf-8-sig')
+            w = csv.DictWriter(f, fieldnames=CSV_HEADER)
+            w.writeheader()
+            print(f'  [CSV] 建立新檔: {path}')
+        return f, w, path
+
+    current_date_str = datetime.now(TZ_UTC8).strftime('%Y-%m-%d')
+    csv_file, csv_writer, csv_path = open_csv_for_date(current_date_str)
 
     pp = f'{int(args.battery_pp):02d}'
     total_reads = 0
@@ -250,6 +262,13 @@ def main():
         while True:
             loop_start = time.time()
             now = datetime.now(TZ_UTC8)
+
+            # 跨日檢查：日期變了就開新 CSV
+            today_str = now.strftime('%Y-%m-%d')
+            if today_str != current_date_str:
+                csv_file.close()
+                current_date_str = today_str
+                csv_file, csv_writer, csv_path = open_csv_for_date(current_date_str)
 
             # 1) Write Command.txt (scenario 4, power=0, flow=0)
             ok = write_command_txt(
