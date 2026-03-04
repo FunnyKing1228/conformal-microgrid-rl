@@ -197,14 +197,27 @@ def main():
     # CSV log
     os.makedirs(args.log_dir, exist_ok=True)
     date_str = datetime.now().strftime('%Y%m%d_%H%M%S')
-    csv_path = os.path.join(args.log_dir, f'solar_log_{date_str}.csv')
+    csv_path = os.path.join(args.log_dir, f'collected_data_{date_str}.csv')
 
+    # CSV 格式與舊版 DataCollector 相容
     csv_header = [
-        'timestamp', 'elapsed_sec',
-        'solar_v', 'solar_i_ma', 'solar_p_mw',
-        'mppt_v', 'mppt_i_ma', 'mppt_p_mw',
-        'batt_soc_pct', 'batt_v', 'batt_i_ma', 'batt_temp_c', 'batt_speed_pct',
-        'data_txt_ts',
+        'timestamp',           # 時間戳
+        'battery_id',          # 電池 ID
+        'soc_percent',         # SoC (%)
+        'voltage_v',           # 電壓 (V)
+        'current_ma',          # 電流 (mA)
+        'temp_c',              # 溫度 (°C)
+        'speed_percent',       # 流速 (%)
+        'solar_v',             # 太陽能電壓 (V)
+        'solar_i_ma',          # 太陽能電流 (mA)
+        'solar_p_mw',          # 太陽能功率 (mW)
+        'mppt_v',              # MPPT 電壓 (V)
+        'mppt_i_ma',           # MPPT 電流 (mA)
+        'mppt_p_mw',           # MPPT 功率 (mW)
+        'load_count',          # 負載組數
+        'load_power_w',        # 負載總功率 (W)
+        'data_txt_ts',         # Data.txt 原始時間戳 (bonus)
+        'elapsed_sec',         # 累計秒數 (bonus)
     ]
     csv_file = open(csv_path, 'w', newline='', encoding='utf-8-sig')
     csv_writer = csv.DictWriter(csv_file, fieldnames=csv_header)
@@ -253,10 +266,26 @@ def main():
             ts_str, mppt, batteries = parse_data_txt(args.data_file)
             elapsed = time.time() - start_time
 
+            load_power_w = args.load_count * 12.0  # 每組 12W @5V
+
             row = {
                 'timestamp': now.strftime('%Y-%m-%d %H:%M:%S'),
-                'elapsed_sec': f'{elapsed:.1f}',
+                'battery_id': pp,
+                'soc_percent': '',
+                'voltage_v': '',
+                'current_ma': '',
+                'temp_c': '',
+                'speed_percent': '',
+                'solar_v': '',
+                'solar_i_ma': '',
+                'solar_p_mw': '',
+                'mppt_v': '',
+                'mppt_i_ma': '',
+                'mppt_p_mw': '',
+                'load_count': str(args.load_count),
+                'load_power_w': f'{load_power_w:.1f}',
                 'data_txt_ts': ts_str or '',
+                'elapsed_sec': f'{elapsed:.1f}',
             }
 
             if mppt:
@@ -279,11 +308,11 @@ def main():
                     break
             if batt:
                 row.update({
-                    'batt_soc_pct': f'{batt["soc_pct"]:.1f}',
-                    'batt_v': f'{batt["volt_v"]:.2f}',
-                    'batt_i_ma': f'{batt["curr_ma"]:.0f}',
-                    'batt_temp_c': f'{batt["temp_c"]:.1f}',
-                    'batt_speed_pct': f'{batt["speed_pct"]:.1f}',
+                    'soc_percent': f'{batt["soc_pct"]:.2f}',
+                    'voltage_v': f'{batt["volt_v"]:.2f}',
+                    'current_ma': f'{batt["curr_ma"]:.0f}',
+                    'temp_c': f'{batt["temp_c"]:.1f}',
+                    'speed_percent': f'{batt["speed_pct"]:.1f}',
                 })
 
             csv_writer.writerow(row)
