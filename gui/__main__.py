@@ -1,19 +1,16 @@
 """
-Entry point for PyInstaller
-This ensures the module paths are set correctly before importing
+Entry point for GUI / PyInstaller
+啟動 P302 微電網 AI 控制介面
 """
 import os
 import sys
 
-# 設定模組路徑（與 run_online_control.py 相同）
-app_dir = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, app_dir)
-src_dir = os.path.join(app_dir, 'src')
-sys.path.insert(0, src_dir)
+# 確保專案根目錄在路徑中
+gui_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(gui_dir)
+sys.path.insert(0, project_root)
 
-# 導入並執行主程式
-from run_online_control import main
+from gui.ai_control_gui import main
 
 if __name__ == "__main__":
     main()
-
