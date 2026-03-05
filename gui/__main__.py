@@ -1,6 +1,11 @@
 """
 Entry point for GUI / PyInstaller
 啟動 P302 微電網 AI 控制介面
+
+支援模式切換：
+  python -m gui                          → GUI
+  python -m gui --mode solar_test [...]  → solar_test_collect
+  python -m gui --mode deployment [...]  → run_deployment
 """
 import os
 import sys

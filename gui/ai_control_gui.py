@@ -562,14 +562,8 @@ class AIControlGUI(tk.Tk):
 
         # 確定腳本路徑
         if getattr(sys, 'frozen', False):
-            # EXE 模式
-            exe_dir = os.path.dirname(sys.executable)
-            script = os.path.join(exe_dir, "run_deployment.exe")
-            if not os.path.exists(script):
-                script = os.path.join(exe_dir, "control", "run_deployment.py")
-                cmd = [sys.executable, script]
-            else:
-                cmd = [script]
+            # PyInstaller EXE：用 --mode deployment 讓自己切換到部署模式
+            cmd = [sys.executable, "--mode", "deployment"]
         else:
             cmd = [sys.executable, DEPLOYMENT_SCRIPT]
 
@@ -594,13 +588,8 @@ class AIControlGUI(tk.Tk):
         poll_sec = self.poll_sec_var.get() or "10"
 
         if getattr(sys, 'frozen', False):
-            exe_dir = os.path.dirname(sys.executable)
-            script = os.path.join(exe_dir, "solar_test_collect.exe")
-            if not os.path.exists(script):
-                script = os.path.join(exe_dir, "control", "solar_test_collect.py")
-                cmd = [sys.executable, script]
-            else:
-                cmd = [script]
+            # PyInstaller EXE：用 --mode solar_test 讓自己切換到太陽能測試模式
+            cmd = [sys.executable, "--mode", "solar_test"]
         else:
             cmd = [sys.executable, SOLAR_TEST_SCRIPT]
 
@@ -622,13 +611,7 @@ class AIControlGUI(tk.Tk):
         poll_sec = self.poll_sec_var.get() or "10"
 
         if getattr(sys, 'frozen', False):
-            exe_dir = os.path.dirname(sys.executable)
-            script = os.path.join(exe_dir, "solar_test_collect.exe")
-            if not os.path.exists(script):
-                script = os.path.join(exe_dir, "control", "solar_test_collect.py")
-                cmd = [sys.executable, script]
-            else:
-                cmd = [script]
+            cmd = [sys.executable, "--mode", "solar_test"]
         else:
             cmd = [sys.executable, SOLAR_TEST_SCRIPT]
 
@@ -988,7 +971,54 @@ class AIControlGUI(tk.Tk):
 # ======================================================================
 # Entry point
 # ======================================================================
+def _resolve_control_path():
+    """找到 control/ 目錄並加入 sys.path，確保子腳本可匯入"""
+    candidates = [
+        CONTROL_DIR,                                         # 原始碼模式
+        os.path.join(os.path.dirname(sys.executable), "_internal", "control"),  # PyInstaller one-dir
+    ]
+    if hasattr(sys, '_MEIPASS'):
+        candidates.insert(0, os.path.join(sys._MEIPASS, "control"))
+
+    for d in candidates:
+        if os.path.isdir(d):
+            if d not in sys.path:
+                sys.path.insert(0, d)
+            parent = os.path.dirname(d)
+            if parent not in sys.path:
+                sys.path.insert(0, parent)
+            return d
+    return None
+
+
 def main():
+    """
+    主入口。支援 --mode 參數以在 PyInstaller EXE 中切換模式：
+      P302_AI_GUI.exe                          → GUI
+      P302_AI_GUI.exe --mode solar_test [...]  → solar_test_collect.main()
+      P302_AI_GUI.exe --mode deployment [...]  → run_deployment.main()
+    """
+    # 檢查是否為子模式（由 GUI 的 subprocess 呼叫）
+    if len(sys.argv) >= 3 and sys.argv[1] == "--mode":
+        mode = sys.argv[2]
+        # 移除 --mode <mode>，讓子腳本的 argparse 正常工作
+        sys.argv = [sys.argv[0]] + sys.argv[3:]
+
+        _resolve_control_path()
+
+        if mode == "solar_test":
+            from solar_test_collect import main as solar_main
+            solar_main()
+            return
+        elif mode == "deployment":
+            from run_deployment import main as deploy_main
+            deploy_main()
+            return
+        else:
+            print(f"Unknown mode: {mode}", file=sys.stderr)
+            sys.exit(1)
+
+    # 預設：啟動 GUI
     app = AIControlGUI()
     app.mainloop()
 

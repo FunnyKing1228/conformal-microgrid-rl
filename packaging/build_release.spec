@@ -17,7 +17,8 @@ a = Analysis(
 
     # 附帶資料檔案：(src, dest_in_bundle)
     datas=[
-        # 控制腳本（需要被子進程呼叫）
+        # 控制腳本（需要被子進程呼叫，也需要被 --mode 匯入）
+        (os.path.join(PROJECT_ROOT, 'control', '__init__.py'),            'control'),
         (os.path.join(PROJECT_ROOT, 'control', 'solar_test_collect.py'),  'control'),
         (os.path.join(PROJECT_ROOT, 'control', 'run_deployment.py'),      'control'),
         (os.path.join(PROJECT_ROOT, 'control', 'run_online_control.py'),  'control'),
@@ -53,7 +54,9 @@ a = Analysis(
         # core modules that deployment script imports
         'core.sac_agent', 'core.microgrid_env', 'core.safety_net',
         'core.soh_predictor', 'core.soh_predictor.inference',
-        'control.io_protocol',
+        # control modules（--mode dispatch 需要匯入）
+        'control', 'control.io_protocol',
+        'control.solar_test_collect', 'control.run_deployment',
     ],
 
     hookspath=[],
