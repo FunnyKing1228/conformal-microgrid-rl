@@ -756,48 +756,84 @@ class AIControlGUI(tk.Tk):
         self.after(1000, self._poll_data_command)
 
     def _format_data_display(self, raw: str) -> str:
-        """格式化 Data.txt 顯示"""
+        """格式化 Data.txt 顯示（支援新版 MPPT-Bus + 負載格式）"""
         if not raw:
             return "(空)"
-        lines = raw.strip().split('\n')
+        lines = [ln.strip() for ln in raw.strip().split('\n') if ln.strip()]
         out = []
-        for i, line in enumerate(lines):
-            line = line.strip()
-            if not line:
-                continue
-            parts = [p.strip() for p in line.split(',') if p.strip()]
-            if i == 0 and len(parts[0]) >= 14 and parts[0][:14].isdigit():
-                # 時間戳行
+        idx = 0
+        
+        # Line 1: 時間戳
+        if idx < len(lines):
+            parts = [p.strip() for p in lines[idx].split(',') if p.strip()]
+            if len(parts[0]) >= 14 and parts[0][:14].isdigit():
                 ts = parts[0][:14]
                 load_info = f", 負載={parts[1]}組" if len(parts) > 1 else ""
                 out.append(f"時間: {ts[:4]}/{ts[4:6]}/{ts[6:8]} {ts[8:10]}:{ts[10:12]}:{ts[12:14]}{load_info}")
-            elif i == 1 and len(parts) >= 6:
-                # MPPT 行
-                try:
-                    sv = float(parts[0]) / 100.0
-                    si = float(parts[1])
-                    sp = float(parts[2])
-                    mv = float(parts[3]) / 100.0
-                    mi = float(parts[4])
-                    mp = float(parts[5])
-                    out.append(f"Solar: {sv:.2f}V {si:.0f}mA {sp:.0f}mW")
-                    out.append(f"MPPT : {mv:.2f}V {mi:.0f}mA {mp:.0f}mW ({mp/1000:.3f}W)")
-                except (ValueError, IndexError):
-                    out.append(f"MPPT: {line}")
-            else:
-                # 電池行
-                if len(parts) >= 6:
+                idx += 1
+        
+        # Line 2: MPPT 行（6 或 9 欄位）
+        has_bus = False
+        if idx < len(lines):
+            parts = [p.strip() for p in lines[idx].split(',') if p.strip()]
+            if len(parts) >= 6:
+                first_field = parts[0]
+                is_battery = first_field.isdigit() and 1 <= int(first_field) <= 10
+                if not is_battery:
                     try:
-                        pp = parts[0]
-                        soc = float(parts[1]) / 10.0
-                        bv = float(parts[2]) / 100.0
-                        bi = float(parts[3])
-                        temp = float(parts[4]) / 10.0
-                        speed = float(parts[5]) / 10.0
-                        out.append(f"電池{pp}: SoC={soc:.1f}% V={bv:.2f}V I={bi:.0f}mA T={temp:.1f}°C 流速={speed:.0f}%")
+                        sv = float(parts[0]) / 100.0
+                        si = float(parts[1])
+                        sp = float(parts[2])
+                        mv = float(parts[3]) / 100.0
+                        mi = float(parts[4])
+                        mp = float(parts[5])
+                        out.append(f"Solar: {sv:.2f}V {si:.0f}mA {sp:.0f}mW ({sp/1000:.3f}W)")
+                        out.append(f"MPPT : {mv:.2f}V {mi:.0f}mA {mp:.0f}mW ({mp/1000:.3f}W)")
+                        # 新格式：MPPT-Bus（≥9 欄位）
+                        if len(parts) >= 9:
+                            bv2 = float(parts[6]) / 100.0
+                            bi2 = float(parts[7])
+                            bp2 = float(parts[8])
+                            out.append(f"Bus  : {bv2:.2f}V {bi2:.0f}mA {bp2:.0f}mW ({bp2/1000:.3f}W)")
+                            has_bus = True
                     except (ValueError, IndexError):
-                        out.append(line)
-                else:
+                        out.append(f"MPPT: {lines[idx]}")
+                    idx += 1
+        
+        # Line 3 (新格式): 負載行（3 欄位，在 MPPT-Bus 之後）
+        if idx < len(lines) and has_bus:
+            parts = [p.strip() for p in lines[idx].split(',') if p.strip()]
+            if len(parts) >= 3:
+                first_field = parts[0]
+                is_battery = (first_field.isdigit() and 1 <= int(first_field) <= 10
+                              and len(parts) >= 6)
+                if not is_battery:
+                    try:
+                        lv = float(parts[0]) / 100.0
+                        li = float(parts[1])
+                        lp = float(parts[2])
+                        out.append(f"負載 : {lv:.2f}V {li:.0f}mA {lp:.0f}mW ({lp/1000:.3f}W)")
+                    except (ValueError, IndexError):
+                        out.append(f"Load: {lines[idx]}")
+                    idx += 1
+        
+        # 剩餘行: 電池資料
+        while idx < len(lines):
+            line = lines[idx]
+            idx += 1
+            parts = [p.strip() for p in line.split(',') if p.strip()]
+            if len(parts) >= 6:
+                try:
+                    pp = parts[0]
+                    soc = float(parts[1]) / 10.0
+                    bv = float(parts[2]) / 100.0
+                    bi = float(parts[3])
+                    temp = float(parts[4]) / 10.0
+                    speed = float(parts[5]) / 10.0
+                    out.append(f"電池{pp}: SoC={soc:.1f}% V={bv:.2f}V I={bi:.0f}mA T={temp:.1f}°C 流速={speed:.0f}%")
+                except (ValueError, IndexError):
+                    out.append(line)
+            else:
                     out.append(line)
         return '\n'.join(out) if out else raw
 

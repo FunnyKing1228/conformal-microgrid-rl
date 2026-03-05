@@ -162,6 +162,14 @@ class Reading:
     mppt_v: float = 0.0        # 電壓 V
     mppt_i_ma: float = 0.0     # 電流 mA
     solar_p_mw: float = 0.0    # Raw solar power mW
+    # MPPT-Bus（新格式 2026/03）
+    bus_v: float = 0.0         # Bus 電壓 V
+    bus_i_ma: float = 0.0      # Bus 電流 mA
+    bus_p_mw: float = 0.0      # Bus 功率 mW
+    # 負載實測（新格式 2026/03）
+    load_v: float = 0.0        # 負載電壓 V
+    load_i_ma: float = 0.0     # 負載電流 mA
+    load_p_mw: float = 0.0     # 負載功率 mW
     # 電池
     batt_soc_pct: float = 50.0 # 韌體 SoC %（參考用）
     batt_v: float = 0.0        # 電池電壓 V
@@ -222,6 +230,9 @@ class DataBuffer:
             return {
                 'mppt_p_mean_mW': 0.0, 'mppt_p_std_mW': 0.0, 'mppt_p_max_mW': 0.0,
                 'mppt_p_mean_kW': 0.0,
+                'bus_p_mean_mW': 0.0,      # MPPT-Bus 平均功率 (mW)
+                'load_p_mean_mW': 0.0,     # 負載實測平均功率 (mW)
+                'load_p_mean_kW': 0.0,     # 負載實測平均功率 (kW)
                 'batt_v_mean': 0.0, 'batt_i_mean_ma': 0.0, 'batt_temp_mean': 25.0,
                 'n_samples': 0, 'completeness': 0.0,
             }
@@ -230,6 +241,10 @@ class DataBuffer:
         batt_v_vals = [r.batt_v for r in self.readings]
         batt_i_vals = [r.batt_i_ma for r in self.readings]
         temp_vals = [r.batt_temp_c for r in self.readings]
+        
+        # 新格式欄位（可能為 0 如果用舊格式韌體）
+        bus_p_vals = [r.bus_p_mw for r in self.readings if r.bus_p_mw > 0]
+        load_p_vals = [r.load_p_mw for r in self.readings if r.load_p_mw > 0]
 
         n = len(self.readings)
         # 預期 15min / 11s ≈ 82 筆
@@ -239,12 +254,18 @@ class DataBuffer:
         mppt_mean = float(np.mean(mppt_vals)) if mppt_vals else 0.0
         mppt_std = float(np.std(mppt_vals)) if len(mppt_vals) > 1 else 0.0
         mppt_max = float(np.max(mppt_vals)) if mppt_vals else 0.0
+        
+        bus_p_mean = float(np.mean(bus_p_vals)) if bus_p_vals else 0.0
+        load_p_mean = float(np.mean(load_p_vals)) if load_p_vals else 0.0
 
         return {
             'mppt_p_mean_mW': mppt_mean,
             'mppt_p_std_mW': mppt_std,
             'mppt_p_max_mW': mppt_max,
             'mppt_p_mean_kW': mppt_mean / 1e6,   # mW → kW
+            'bus_p_mean_mW': bus_p_mean,           # MPPT-Bus 平均 (mW)
+            'load_p_mean_mW': load_p_mean,         # 負載實測平均 (mW)
+            'load_p_mean_kW': load_p_mean / 1e6,   # 負載實測 (kW)
             'batt_v_mean': float(np.mean(batt_v_vals)) if batt_v_vals else 0.0,
             'batt_i_mean_ma': float(np.mean(batt_i_vals)) if batt_i_vals else 0.0,
             'batt_temp_mean': float(np.mean(temp_vals)) if temp_vals else 25.0,
@@ -395,10 +416,15 @@ def build_state_from_aggregation(
     # PV: 從 MPPT 聚合數據（已轉為 kW）
     pv_kw = agg['mppt_p_mean_kW']
 
-    # 負載: 從時間表查詢
-    load_groups = get_load_groups(now.time())
-    load_w = load_groups * LOAD_PER_GROUP_W
-    load_kw = load_w / 1000.0
+    # 負載: 優先用 Data.txt 實測值（新格式），否則用排程估計
+    load_measured_kw = agg.get('load_p_mean_kW', 0.0)
+    if load_measured_kw > 0:
+        load_kw = load_measured_kw   # 使用實測值
+    else:
+        # 舊格式 fallback: 從時間表查詢
+        load_groups = get_load_groups(now.time())
+        load_w = load_groups * LOAD_PER_GROUP_W
+        load_kw = load_w / 1000.0
 
     # 電價（2026 台電 TOU）
     price = get_tou_price(now.hour, now.weekday())
@@ -495,9 +521,13 @@ def read_data_txt(path: str, battery_pp: str = "01") -> Optional[Reading]:
         Reading 或 None（讀取失敗/檔案不存在）
     """
     try:
-        mppt_data, batt_data = read_vendor_data_file(
+        result = read_vendor_data_file(
             path, max_age_sec=60, clear_after_read=False
         )
+        mppt_data = result['mppt']
+        batt_data = result['batteries']
+        mppt_bus = result.get('mppt_bus')   # 新格式才有
+        load_hw  = result.get('load')       # 新格式才有
     except Exception:
         return None
 
@@ -511,6 +541,18 @@ def read_data_txt(path: str, battery_pp: str = "01") -> Optional[Reading]:
         reading.mppt_v = mppt_v
         reading.mppt_i_ma = mppt_i_ma
         reading.solar_p_mw = solar_p_mw
+
+    # MPPT-Bus 數據（新格式）
+    if mppt_bus is not None:
+        reading.bus_v = mppt_bus[0]
+        reading.bus_i_ma = mppt_bus[1]
+        reading.bus_p_mw = mppt_bus[2]
+
+    # 負載實測數據（新格式）
+    if load_hw is not None:
+        reading.load_v = load_hw[0]
+        reading.load_i_ma = load_hw[1]
+        reading.load_p_mw = load_hw[2]
 
     # 電池數據
     if battery_pp in batt_data:

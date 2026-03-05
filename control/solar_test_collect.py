@@ -49,22 +49,36 @@ TZ_UTC8 = timezone(timedelta(hours=8))
 # ====================================================================
 def parse_data_txt(path):
     """
-    Parse vendor Data.txt format.
-    Returns: (timestamp_str, mppt_dict, battery_list)
+    Parse vendor Data.txt format (supports both old 6-field and new 9-field MPPT).
     
-    mppt_dict keys: solar_v, solar_i_ma, solar_p_mw, mppt_v, mppt_i_ma, mppt_p_mw
+    New format (2026/03):
+        Line 1: YYYYMMDDHHmmSS
+        Line 2: SolarV,SolarI,SolarP,MPPT_V,MPPT_I,MPPT_P,BusV,BusI,BusP,
+        Line 3: LoadV,LoadI,LoadP,
+        Line 4+: ID,SOC,BV,BI,Temp,Speed,
+    
+    Old format:
+        Line 1: YYYYMMDDHHmmSS
+        Line 2: SolarV,SolarI,SolarP,MPPT_V,MPPT_I,MPPT_P,
+        Line 3+: ID,SOC,BV,BI,Temp,Speed,
+    
+    Returns: (timestamp_str, mppt_dict, mppt_bus_dict, load_dict, battery_list)
+    
+    mppt_dict keys:     solar_v, solar_i_ma, solar_p_mw, mppt_v, mppt_i_ma, mppt_p_mw
+    mppt_bus_dict keys: bus_v, bus_i_ma, bus_p_mw  (or None if old format)
+    load_dict keys:     load_v, load_i_ma, load_p_mw  (or None if old format)
     battery_list: [{pp, soc_pct, volt_v, curr_ma, temp_c, speed_pct}, ...]
     """
     if not os.path.exists(path):
-        return None, None, []
+        return None, None, None, None, []
     try:
         with io.open(path, 'r', encoding='utf-8') as f:
             lines = [ln.strip() for ln in f.readlines() if ln.strip()]
     except Exception:
-        return None, None, []
+        return None, None, None, None, []
 
     if not lines:
-        return None, None, []
+        return None, None, None, None, []
 
     # Line 1: timestamp (14 digits, optionally followed by ,load_count)
     ts_str = None
@@ -75,27 +89,53 @@ def parse_data_txt(path):
         ts_str = ts_part[:14]
         idx = 1
 
-    # Line 2: MPPT data (6 numeric fields, first field is NOT a small battery ID)
+    # Line 2: MPPT data (6 or 9 numeric fields, first field is NOT a small battery ID)
     mppt = None
+    mppt_bus = None
     if idx < len(lines):
         parts = [p.strip() for p in lines[idx].split(',') if p.strip()]
         if len(parts) >= 6:
-            # Check if first field could be a battery ID (1-10)
             is_battery_id = parts[0].isdigit() and 1 <= int(parts[0]) <= 10
             if not is_battery_id:
                 try:
-                    vals = [float(p) for p in parts[:6]]
+                    vals = [float(p) for p in parts]
                     mppt = {
-                        'solar_v': vals[0] / 100.0,       # 0.01V
-                        'solar_i_ma': vals[1],              # 1mA
-                        'solar_p_mw': vals[2],              # 1mW
-                        'mppt_v': vals[3] / 100.0,         # 0.01V
-                        'mppt_i_ma': vals[4],               # 1mA
-                        'mppt_p_mw': vals[5],               # 1mW
+                        'solar_v': vals[0] / 100.0,
+                        'solar_i_ma': vals[1],
+                        'solar_p_mw': vals[2],
+                        'mppt_v': vals[3] / 100.0,
+                        'mppt_i_ma': vals[4],
+                        'mppt_p_mw': vals[5],
+                    }
+                    # New format: 9+ fields → MPPT-Bus
+                    if len(vals) >= 9:
+                        mppt_bus = {
+                            'bus_v': vals[6] / 100.0,
+                            'bus_i_ma': vals[7],
+                            'bus_p_mw': vals[8],
+                        }
+                    idx += 1
+                except (ValueError, IndexError):
+                    idx += 1
+
+    # Line 3 (new format only): Load power data (3 fields, only if MPPT-Bus was detected)
+    load = None
+    if idx < len(lines) and mppt_bus is not None:
+        parts = [p.strip() for p in lines[idx].split(',') if p.strip()]
+        if len(parts) >= 3:
+            is_battery = (parts[0].isdigit() and 1 <= int(parts[0]) <= 10
+                          and len(parts) >= 6)
+            if not is_battery:
+                try:
+                    vals = [float(p) for p in parts[:3]]
+                    load = {
+                        'load_v': vals[0] / 100.0,    # 0.01V
+                        'load_i_ma': vals[1],           # mA
+                        'load_p_mw': vals[2],           # mW
                     }
                     idx += 1
                 except (ValueError, IndexError):
-                    idx += 1  # skip bad line
+                    idx += 1
 
     # Remaining lines: battery data
     batteries = []
@@ -107,16 +147,16 @@ def parse_data_txt(path):
         try:
             batteries.append({
                 'pp': parts[0],
-                'soc_pct': float(parts[1]) / 10.0,     # 0.1%
-                'volt_v': float(parts[2]) / 100.0,      # 0.01V
-                'curr_ma': float(parts[3]),               # 1mA
-                'temp_c': float(parts[4]) / 10.0,        # 0.1C
-                'speed_pct': float(parts[5]) / 10.0,     # 0.1%
+                'soc_pct': float(parts[1]) / 10.0,
+                'volt_v': float(parts[2]) / 100.0,
+                'curr_ma': float(parts[3]),
+                'temp_c': float(parts[4]) / 10.0,
+                'speed_pct': float(parts[5]) / 10.0,
             })
         except (ValueError, IndexError):
             continue
 
-    return ts_str, mppt, batteries
+    return ts_str, mppt, mppt_bus, load, batteries
 
 
 # ====================================================================
@@ -194,7 +234,7 @@ def main():
                         help='Scenario code (default: 4=Standby)')
     args = parser.parse_args()
 
-    # CSV 格式與舊版 DataCollector 相容
+    # CSV 格式與舊版 DataCollector 相容 + 新增 MPPT-Bus / Load 欄位
     CSV_HEADER = [
         'timestamp',           # 時間戳
         'battery_id',          # 電池 ID
@@ -209,10 +249,16 @@ def main():
         'mppt_v',              # MPPT 電壓 (V)
         'mppt_i_ma',           # MPPT 電流 (mA)
         'mppt_p_mw',           # MPPT 功率 (mW)
+        'bus_v',               # MPPT-Bus 電壓 (V)   ← 新增
+        'bus_i_ma',            # MPPT-Bus 電流 (mA)  ← 新增
+        'bus_p_mw',            # MPPT-Bus 功率 (mW)  ← 新增
+        'load_v',              # 負載電壓 (V)        ← 新增
+        'load_i_ma',           # 負載電流 (mA)       ← 新增
+        'load_p_mw',           # 負載功率 (mW)       ← 新增
         'load_count',          # 負載組數
-        'load_power_w',        # 負載總功率 (W)
-        'data_txt_ts',         # Data.txt 原始時間戳 (bonus)
-        'elapsed_sec',         # 累計秒數 (bonus)
+        'load_power_w',        # 負載總功率 (W, 估計值)
+        'data_txt_ts',         # Data.txt 原始時間戳
+        'elapsed_sec',         # 累計秒數
     ]
 
     os.makedirs(args.log_dir, exist_ok=True)
@@ -281,11 +327,15 @@ def main():
                 flow_pct=0,
             )
 
-            # 2) Read Data.txt
-            ts_str, mppt, batteries = parse_data_txt(args.data_file)
+            # 2) Read Data.txt (supports old 6-field and new 9-field + load)
+            ts_str, mppt, mppt_bus, load, batteries = parse_data_txt(args.data_file)
             elapsed = time.time() - start_time
 
-            load_power_w = args.load_count * 12.0  # 每組 12W @5V
+            # 負載功率：優先用 Data.txt 實測值，否則用估計值
+            if load is not None:
+                load_power_w = load['load_p_mw'] / 1000.0  # mW → W
+            else:
+                load_power_w = args.load_count * 12.0  # 每組 12W @5V (估計)
 
             row = {
                 'timestamp': now.strftime('%Y-%m-%d %H:%M:%S'),
@@ -301,6 +351,12 @@ def main():
                 'mppt_v': '',
                 'mppt_i_ma': '',
                 'mppt_p_mw': '',
+                'bus_v': '',
+                'bus_i_ma': '',
+                'bus_p_mw': '',
+                'load_v': '',
+                'load_i_ma': '',
+                'load_p_mw': '',
                 'load_count': str(args.load_count),
                 'load_power_w': f'{load_power_w:.1f}',
                 'data_txt_ts': ts_str or '',
@@ -318,6 +374,20 @@ def main():
                 })
                 mppt_values.append(mppt['mppt_p_mw'])
                 total_reads += 1
+
+            if mppt_bus:
+                row.update({
+                    'bus_v': f'{mppt_bus["bus_v"]:.2f}',
+                    'bus_i_ma': f'{mppt_bus["bus_i_ma"]:.0f}',
+                    'bus_p_mw': f'{mppt_bus["bus_p_mw"]:.0f}',
+                })
+
+            if load:
+                row.update({
+                    'load_v': f'{load["load_v"]:.2f}',
+                    'load_i_ma': f'{load["load_i_ma"]:.0f}',
+                    'load_p_mw': f'{load["load_p_mw"]:.0f}',
+                })
 
             # Battery info (if available)
             batt = None
@@ -342,6 +412,15 @@ def main():
             if mppt:
                 mppt_w = mppt['mppt_p_mw'] / 1000.0
                 solar_w = mppt['solar_p_mw'] / 1000.0
+                
+                extra = ''
+                if mppt_bus:
+                    bus_w = mppt_bus['bus_p_mw'] / 1000.0
+                    extra += f'  Bus={bus_w:.3f}W'
+                if load:
+                    load_w = load['load_p_mw'] / 1000.0
+                    extra += f'  Load={load_w:.3f}W'
+                
                 batt_info = ''
                 if batt:
                     batt_info = (f'  Batt: {batt["volt_v"]:.2f}V '
@@ -352,7 +431,7 @@ def main():
                 # Stats
                 stats = ''
                 if len(mppt_values) > 5:
-                    recent = mppt_values[-30:]  # last 30
+                    recent = mppt_values[-30:]
                     avg = sum(recent) / len(recent)
                     if HAS_NP:
                         std = float(np.std(recent))
@@ -363,8 +442,8 @@ def main():
                 cmd_ok = 'OK' if ok else 'FAIL'
                 print(f'  [{ts_display}] #{total_reads:5d}  '
                       f'MPPT={mppt["mppt_p_mw"]:6.0f}mW ({mppt_w:.3f}W)  '
-                      f'Solar={solar_w:.3f}W  '
-                      f'V={mppt["mppt_v"]:.2f}V  I={mppt["mppt_i_ma"]:.0f}mA'
+                      f'Solar={solar_w:.3f}W'
+                      f'{extra}'
                       f'{batt_info}{stats}  [Cmd:{cmd_ok}]')
             else:
                 print(f'  [{ts_display}] No MPPT data (waiting for Data.txt...)'

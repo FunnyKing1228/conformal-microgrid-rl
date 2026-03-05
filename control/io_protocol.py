@@ -408,11 +408,43 @@ def read_status_file(path: str, max_age_sec: Optional[int] = None) -> Dict[str, 
 
 
 # ---- 廠商 Data File 格式（元件 → 模型）----
-# 格式（廠商 2025/12/12 最新版）：
+# 格式（2026/03 新版 — 含 MPPT-Bus + 負載）：
 #   第一行：YYYYMMDDHHmmSS（時間戳）
-#   第二行：SolarV,SolarI,SolarP,MPPT_V,MPPT_I,MPPT_P,（MPPT 資料）
-#   第三行開始：ID,SOC,BV,BI,Temp,Speed,（電池資料）
+#   第二行：SolarV,SolarI,SolarP,MPPT_V,MPPT_I,MPPT_P,BusV,BusI,BusP,
+#   第三行：LoadV,LoadI,LoadP,
+#   第四行開始：ID,SOC,BV,BI,Temp,Speed,（電池資料）
+#
+# 向下相容舊格式（2025/12）：
+#   第一行：YYYYMMDDHHmmSS
+#   第二行：SolarV,SolarI,SolarP,MPPT_V,MPPT_I,MPPT_P,
+#   第三行開始：ID,SOC,BV,BI,Temp,Speed,
 # 範例：01,101,500,1200,450,100,
+
+
+class _VendorDataResult(dict):
+	"""
+	read_vendor_data_file 回傳型別。
+	
+	同時支援：
+		1. 新版 dict 存取：result['mppt'], result['mppt_bus'], result['load'], result['batteries']
+		2. 舊版 tuple 解構：mppt_data, battery_data = result  （向下相容）
+	"""
+	def __init__(self, mppt, mppt_bus, load, batteries, timestamp):
+		super().__init__(
+			mppt=mppt,
+			mppt_bus=mppt_bus,
+			load=load,
+			batteries=batteries,
+			timestamp=timestamp,
+		)
+		self._tuple = (mppt, batteries)  # 向下相容
+	
+	def __iter__(self):
+		"""允許 mppt_data, batt_data = result"""
+		return iter(self._tuple)
+	
+	def __len__(self):
+		return 2  # 向下相容 tuple 長度
 
 def parse_vendor_data_line(line: str) -> Tuple[str, float, float, float, float, float]:
 	"""
@@ -459,7 +491,7 @@ def parse_vendor_data_line(line: str) -> Tuple[str, float, float, float, float, 
 
 def parse_mppt_line(line: str) -> Tuple[float, float, float, float, float, float]:
 	"""
-	解析 MPPT 行（太陽能板資料）。
+	解析 MPPT 行（太陽能板資料）— 舊版 6 欄位相容。
 	
 	格式：SolarV,SolarI,SolarP,MPPT_V,MPPT_I,MPPT_P,
 	
@@ -476,10 +508,6 @@ def parse_mppt_line(line: str) -> Tuple[float, float, float, float, float, float
 	parts = [p.strip() for p in line.strip().split(",") if p.strip()]
 	if len(parts) < 6:
 		raise ValueError(f"Invalid MPPT line: {line!r}")
-	
-	# 確保只有6欄位
-	if len(parts) > 6:
-		parts = parts[:6]
 	
 	solar_v_raw = int(parts[0]) if parts[0].isdigit() else 0
 	solar_v = float(solar_v_raw) / 100.0  # 0.01V 單位（1600 = 16.00V）
@@ -502,15 +530,94 @@ def parse_mppt_line(line: str) -> Tuple[float, float, float, float, float, float
 	return solar_v, solar_i_ma, solar_p_mw, mppt_v, mppt_i_ma, mppt_p_mw
 
 
-def read_vendor_data_file(path: str, max_age_sec: Optional[int] = None, 
-                          clear_after_read: bool = True) -> Tuple[Optional[Tuple[float, float, float, float, float, float]], Dict[str, Tuple[datetime, float, float, float, float, float]]]:
+def parse_mppt_line_v2(line: str) -> Tuple[
+	Tuple[float, float, float, float, float, float],
+	Optional[Tuple[float, float, float]]
+]:
 	"""
-	讀取廠商 Data File（Data.txt），回傳太陽能板資料和每個電池的最新一筆。
+	解析 MPPT 行（太陽能板資料）— 新版支援 MPPT-Bus（9 欄位）。
 	
-	格式（廠商 2025/12/12 最新版）：
+	格式（新版 2026/03）：
+		SolarV,SolarI,SolarP,MPPT_V,MPPT_I,MPPT_P,BusV,BusI,BusP,
+	
+	格式（舊版）：
+		SolarV,SolarI,SolarP,MPPT_V,MPPT_I,MPPT_P,
+	
+	單位（全部相同）：
+		- V: 0.01V（1600 = 16.00V）
+		- I: 1mA（500 = 500 mA）
+		- P: 1mW（8000 = 8000 mW）
+	
+	Returns:
+		(mppt_6tuple, mppt_bus_3tuple_or_None)
+		mppt_6tuple: (solar_v, solar_i_ma, solar_p_mw, mppt_v, mppt_i_ma, mppt_p_mw)
+		mppt_bus:    (bus_v, bus_i_ma, bus_p_mw) 或 None（舊格式）
+	"""
+	parts = [p.strip() for p in line.strip().split(",") if p.strip()]
+	if len(parts) < 6:
+		raise ValueError(f"Invalid MPPT line: {line!r}")
+	
+	# 前 6 欄：Solar + MPPT
+	solar_v = float(int(parts[0]) if parts[0].isdigit() else 0) / 100.0
+	solar_i_ma = float(int(parts[1]) if parts[1].isdigit() else 0)
+	solar_p_mw = float(int(parts[2]) if parts[2].isdigit() else 0)
+	mppt_v = float(int(parts[3]) if parts[3].isdigit() else 0) / 100.0
+	mppt_i_ma = float(int(parts[4]) if parts[4].isdigit() else 0)
+	mppt_p_mw = float(int(parts[5]) if parts[5].isdigit() else 0)
+	
+	mppt_6 = (solar_v, solar_i_ma, solar_p_mw, mppt_v, mppt_i_ma, mppt_p_mw)
+	
+	# 後 3 欄：MPPT-Bus（新版格式 ≥9 欄位）
+	mppt_bus = None
+	if len(parts) >= 9:
+		bus_v = float(int(parts[6]) if parts[6].isdigit() else 0) / 100.0
+		bus_i_ma = float(int(parts[7]) if parts[7].isdigit() else 0)
+		bus_p_mw = float(int(parts[8]) if parts[8].isdigit() else 0)
+		mppt_bus = (bus_v, bus_i_ma, bus_p_mw)
+	
+	return mppt_6, mppt_bus
+
+
+def parse_load_line(line: str) -> Tuple[float, float, float]:
+	"""
+	解析負載功耗行（2026/03 新增）。
+	
+	格式：LoadV,LoadI,LoadP,
+	
+	單位（與 MPPT 相同）：
+		- V: 0.01V（1200 = 12.00V）
+		- I: 1mA（5500 = 5500 mA）
+		- P: 1mW（6600 = 6600 mW）
+	
+	Returns:
+		(load_v, load_i_ma, load_p_mw)
+	"""
+	parts = [p.strip() for p in line.strip().split(",") if p.strip()]
+	if len(parts) < 3:
+		raise ValueError(f"Invalid load line: {line!r}")
+	
+	load_v = float(int(parts[0]) if parts[0].isdigit() else 0) / 100.0   # 0.01V
+	load_i_ma = float(int(parts[1]) if parts[1].isdigit() else 0)        # mA
+	load_p_mw = float(int(parts[2]) if parts[2].isdigit() else 0)        # mW
+	
+	return load_v, load_i_ma, load_p_mw
+
+
+def read_vendor_data_file(path: str, max_age_sec: Optional[int] = None, 
+                          clear_after_read: bool = True) -> Dict:
+	"""
+	讀取廠商 Data File（Data.txt），回傳所有解析資料。
+	
+	格式（2026/03 新版 — 向下相容舊版）：
 		第一行：YYYYMMDDHHmmSS（時間戳）
-		第二行：SolarV,SolarI,SolarP,MPPT_V,MPPT_I,MPPT_P,（MPPT 資料）
-		第三行開始：ID,SOC,BV,BI,Temp,Speed,（電池資料）
+		第二行：SolarV,SolarI,SolarP,MPPT_V,MPPT_I,MPPT_P[,BusV,BusI,BusP],
+		第三行：LoadV,LoadI,LoadP,                      ← 新增（若有 MPPT-Bus）
+		之後：  ID,SOC,BV,BI,Temp,Speed,（電池資料）
+	
+	舊格式（2025/12）：
+		第一行：YYYYMMDDHHmmSS
+		第二行：SolarV,SolarI,SolarP,MPPT_V,MPPT_I,MPPT_P,
+		第三行開始：ID,SOC,BV,BI,Temp,Speed,
 	
 	重要：廠商程式會每秒寫入檔案，讀取時需注意同步問題。
 	
@@ -520,103 +627,111 @@ def read_vendor_data_file(path: str, max_age_sec: Optional[int] = None,
 		clear_after_read: 讀取後是否清空檔案（避免重複讀取）
 	
 	Returns:
-		(mppt_data, battery_data)
-		mppt_data: (solar_v, solar_i_ma, solar_p_mw, mppt_v, mppt_i_ma, mppt_p_mw) 或 None
-			- solar_v, mppt_v: 電壓（V）
-			- solar_i_ma, mppt_i_ma: 電流（毫安，原始數值）
-			- solar_p_mw, mppt_p_mw: 功率（毫瓦，原始數值）
-		battery_data: { PP: (ts, soc_pct, volt_v, curr_ma, temp_c, speed) }
-			- curr_ma: 電池電流（毫安，原始數值）
+		dict with keys:
+			'mppt':      (solar_v, solar_i_ma, solar_p_mw, mppt_v, mppt_i_ma, mppt_p_mw) or None
+			'mppt_bus':  (bus_v, bus_i_ma, bus_p_mw) or None  — 新欄位
+			'load':      (load_v, load_i_ma, load_p_mw) or None  — 新欄位
+			'batteries': { PP: (ts, soc_pct, volt_v, curr_ma, temp_c, speed) }
+			'timestamp': datetime or None
+		
+		向下相容：亦可用 tuple 解構 → mppt_data, battery_data = result
+		（會忽略 mppt_bus / load，不影響舊程式碼）
 	"""
 	results: Dict[str, Tuple[datetime, float, float, float, float, float]] = {}
 	mppt_data: Optional[Tuple[float, float, float, float, float, float]] = None
-	read_ts = datetime.now(TZ_UTC8)  # 備用時間戳（如果檔案沒有時間戳）
+	mppt_bus_data: Optional[Tuple[float, float, float]] = None
+	load_data: Optional[Tuple[float, float, float]] = None
+	file_ts: Optional[datetime] = None
+	read_ts = datetime.now(TZ_UTC8)
 	
 	try:
 		if not os.path.exists(path):
-			return None, results
+			return _VendorDataResult(mppt_data, mppt_bus_data, load_data, results, file_ts)
 		
-		# 嘗試讀取檔案（可能被廠商程式寫入中）
 		lines: List[str] = []
 		try:
 			with io.open(path, "r", encoding="utf-8") as f:
 				lines = [ln for ln in f.readlines() if ln.strip()]
 		except (IOError, OSError, PermissionError):
-			# 檔案被占用或無法讀取
-			return None, results
+			return _VendorDataResult(mppt_data, mppt_bus_data, load_data, results, file_ts)
 		
 		if not lines:
-			return None, results
+			return _VendorDataResult(mppt_data, mppt_bus_data, load_data, results, file_ts)
 		
-		# 第一行：時間戳（如果存在且格式正確）
-		file_ts = read_ts  # 預設使用讀取時間
+		# ── 第一行：時間戳 ──
+		file_ts = read_ts
 		try:
 			first_line = lines[0].strip()
-			# 檢查是否為時間戳格式（14 位數字，或 14 位數字+逗號+負載數）
 			if len(first_line) >= 14:
-				# 提取前 14 位數字
 				ts_part = first_line[:14]
 				if ts_part.isdigit():
-					# 格式：YYYYMMDDHHmmSS 或 YYYYMMDDHHmmSS,負載數
 					file_ts = parse_ts(ts_part)
-					lines = lines[1:]  # 跳過時間戳行
+					lines = lines[1:]
 		except Exception:
-			# 如果時間戳解析失敗，使用讀取時間
 			pass
 		
 		# 檢查時間戳是否過期
 		if max_age_sec is not None:
 			age_sec = (datetime.now(TZ_UTC8) - file_ts).total_seconds()
 			if age_sec > float(max_age_sec):
-				return None, results  # 資料過期，返回空結果
+				return _VendorDataResult(None, None, None, {}, file_ts)
 		
-		# 第二行：MPPT 資料（解析太陽能板資料）
+		# ── 第二行：MPPT（可能含 MPPT-Bus → 9 欄位） ──
 		if lines:
 			first_data_line = lines[0].strip()
 			first_parts = [p.strip() for p in first_data_line.split(",") if p.strip()]
-			# 檢查是否為 MPPT 行：有6個欄位且第一個欄位不是有效的電池ID（1-10）
 			if len(first_parts) >= 6:
 				first_field = first_parts[0]
-				# 如果不是有效的電池 ID（1-10），則視為 MPPT 行
 				if not (first_field.isdigit() and 1 <= int(first_field) <= 10):
 					try:
-						mppt_data = parse_mppt_line(first_data_line)
-						lines = lines[1:]  # 跳過 MPPT 行
+						mppt_6, mppt_bus_data = parse_mppt_line_v2(first_data_line)
+						mppt_data = mppt_6
+						lines = lines[1:]
 					except Exception:
-						# 解析失敗，跳過這行
 						lines = lines[1:]
 		
-		# 第三行開始：解析電池資料
+		# ── 第三行（新格式）：負載功耗（3 欄位，不以電池 ID 開頭） ──
+		if lines and mppt_bus_data is not None:
+			# 只有在新格式（有 MPPT-Bus）時才嘗試解析負載行
+			load_line = lines[0].strip()
+			load_parts = [p.strip() for p in load_line.split(",") if p.strip()]
+			if len(load_parts) >= 3:
+				first_field = load_parts[0]
+				# 負載行不是電池 ID（1-10 開頭且有 6 欄位）
+				is_battery = (first_field.isdigit() and 1 <= int(first_field) <= 10 
+				              and len(load_parts) >= 6)
+				if not is_battery:
+					try:
+						load_data = parse_load_line(load_line)
+						lines = lines[1:]
+					except Exception:
+						lines = lines[1:]
+		
+		# ── 之後：電池資料 ──
 		for ln in lines:
 			try:
 				pp, soc_pct, volt_v, curr_a, temp_c, speed = parse_vendor_data_line(ln)
 			except Exception:
 				continue
-			# 使用檔案時間戳（如果有的話）
 			results[pp] = (file_ts, soc_pct, volt_v, curr_a, temp_c, speed)
 		
 	except Exception:
-		# 任何錯誤都返回空結果
-		return None, results
+		return _VendorDataResult(mppt_data, mppt_bus_data, load_data, results, file_ts)
 	finally:
-		# 清空檔案避免重複讀取（如果要求）
 		if clear_after_read:
 			try:
-				# 嘗試清空檔案（可能被廠商程式占用）
 				with io.open(path, "w", encoding="utf-8") as w:
 					w.write("")
-					w.flush()  # 強制刷新緩衝區
+					w.flush()
 					if hasattr(os, 'fsync'):
 						try:
-							os.fsync(w.fileno())  # 強制同步到磁碟
+							os.fsync(w.fileno())
 						except (OSError, AttributeError):
 							pass
-				# 確保檔案關閉後再返回
-				time.sleep(0.01)  # 10ms 延遲，確保檔案系統釋放鎖定
+				time.sleep(0.01)
 			except (IOError, OSError, PermissionError):
-				# 如果清空失敗（檔案被占用），不影響讀取結果
 				pass
 	
-	return mppt_data, results
+	return _VendorDataResult(mppt_data, mppt_bus_data, load_data, results, file_ts)
 
 
