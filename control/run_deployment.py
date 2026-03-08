@@ -212,16 +212,18 @@ class DataBuffer:
     def aggregate(self) -> Dict[str, float]:
         """
         聚合窗格內所有讀取，回傳統計值。
+        所有功率統一用 mW，需要 kW 時在使用處轉換。
         
         Returns:
             {
                 'mppt_p_mean_mW': float,   # MPPT 平均功率 (mW)
                 'mppt_p_std_mW': float,    # MPPT 標準差 (mW)
                 'mppt_p_max_mW': float,    # MPPT 最大值 (mW)
-                'mppt_p_mean_kW': float,   # MPPT 平均功率 (kW)
-                'batt_v_mean': float,      # 電池電壓平均 (V)
-                'batt_i_mean_ma': float,   # 電池電流平均 (mA)
-                'batt_temp_mean': float,   # 溫度平均 (°C)
+                'bus_p_mean_mW': float,    # MPPT-Bus 平均功率 (mW)
+                'load_p_mean_mW': float,   # 負載實測平均功率 (mW)
+                'batt_p_mean_mW': float,   # 電池平均功率 (mW) = mean(V_i × I_i)
+                'batt_v_mean': float,      # 電池電壓平均 (V) — SoCTracker 診斷用
+                'batt_i_mean_ma': float,   # 電池電流平均 (mA) — SoCTracker 診斷用
                 'n_samples': int,          # 讀取數量
                 'completeness': float,     # 完整度 (0~1)
             }
@@ -229,19 +231,19 @@ class DataBuffer:
         if not self.readings:
             return {
                 'mppt_p_mean_mW': 0.0, 'mppt_p_std_mW': 0.0, 'mppt_p_max_mW': 0.0,
-                'mppt_p_mean_kW': 0.0,
-                'bus_p_mean_mW': 0.0,      # MPPT-Bus 平均功率 (mW)
-                'load_p_mean_mW': 0.0,     # 負載實測平均功率 (mW)
-                'load_p_mean_kW': 0.0,     # 負載實測平均功率 (kW)
-                'batt_v_mean': 0.0, 'batt_i_mean_ma': 0.0, 'batt_temp_mean': 25.0,
+                'bus_p_mean_mW': 0.0,
+                'load_p_mean_mW': 0.0,
+                'batt_p_mean_mW': 0.0,
+                'batt_v_mean': 0.0, 'batt_i_mean_ma': 0.0,
                 'n_samples': 0, 'completeness': 0.0,
             }
 
         mppt_vals = [r.mppt_p_mw for r in self.readings]
+        # 電池功率：正確計算 mean(V_i × I_i)，而非 mean(V) × mean(I)
+        batt_p_vals = [r.batt_v * r.batt_i_ma for r in self.readings]  # V × mA = mW
         batt_v_vals = [r.batt_v for r in self.readings]
         batt_i_vals = [r.batt_i_ma for r in self.readings]
-        temp_vals = [r.batt_temp_c for r in self.readings]
-        
+
         # 新格式欄位（可能為 0 如果用舊格式韌體）
         bus_p_vals = [r.bus_p_mw for r in self.readings if r.bus_p_mw > 0]
         load_p_vals = [r.load_p_mw for r in self.readings if r.load_p_mw > 0]
@@ -254,7 +256,7 @@ class DataBuffer:
         mppt_mean = float(np.mean(mppt_vals)) if mppt_vals else 0.0
         mppt_std = float(np.std(mppt_vals)) if len(mppt_vals) > 1 else 0.0
         mppt_max = float(np.max(mppt_vals)) if mppt_vals else 0.0
-        
+
         bus_p_mean = float(np.mean(bus_p_vals)) if bus_p_vals else 0.0
         load_p_mean = float(np.mean(load_p_vals)) if load_p_vals else 0.0
 
@@ -262,13 +264,11 @@ class DataBuffer:
             'mppt_p_mean_mW': mppt_mean,
             'mppt_p_std_mW': mppt_std,
             'mppt_p_max_mW': mppt_max,
-            'mppt_p_mean_kW': mppt_mean / 1e6,   # mW → kW
-            'bus_p_mean_mW': bus_p_mean,           # MPPT-Bus 平均 (mW)
-            'load_p_mean_mW': load_p_mean,         # 負載實測平均 (mW)
-            'load_p_mean_kW': load_p_mean / 1e6,   # 負載實測 (kW)
+            'bus_p_mean_mW': bus_p_mean,
+            'load_p_mean_mW': load_p_mean,
+            'batt_p_mean_mW': float(np.mean(batt_p_vals)) if batt_p_vals else 0.0,
             'batt_v_mean': float(np.mean(batt_v_vals)) if batt_v_vals else 0.0,
             'batt_i_mean_ma': float(np.mean(batt_i_vals)) if batt_i_vals else 0.0,
-            'batt_temp_mean': float(np.mean(temp_vals)) if temp_vals else 25.0,
             'n_samples': n,
             'completeness': completeness,
         }
@@ -413,11 +413,11 @@ def build_state_from_aggregation(
     Returns:
         6D numpy array (float32)
     """
-    # PV: 從 MPPT 聚合數據（已轉為 kW）
-    pv_kw = agg['mppt_p_mean_kW']
+    # PV: 從 MPPT 聚合數據 (mW → kW)
+    pv_kw = agg['mppt_p_mean_mW'] / 1e6  # mW → kW
 
     # 負載: 優先用 Data.txt 實測值（新格式），否則用排程估計
-    load_measured_kw = agg.get('load_p_mean_kW', 0.0)
+    load_measured_kw = agg.get('load_p_mean_mW', 0.0) / 1e6  # mW → kW
     if load_measured_kw > 0:
         load_kw = load_measured_kw   # 使用實測值
     else:
@@ -579,7 +579,8 @@ class DeploymentLogger:
         'timestamp', 'step',
         'soc', 'load_kw', 'pv_kw', 'price', 'hour', 'dow',
         'mppt_mean_mW', 'mppt_max_mW', 'mppt_std_mW',
-        'batt_v_mean', 'batt_i_mean_ma', 'batt_temp_mean',
+        'bus_p_mean_mW', 'load_p_mean_mW',
+        'batt_p_mean_mW', 'batt_v_mean', 'batt_i_mean_ma',
         'n_samples', 'completeness',
         'action_power_kw', 'action_flow_pct',
         'power_mw_cmd', 'flow_pct_cmd', 'situation_code',
@@ -725,15 +726,15 @@ def main():
                 agg = buffer.aggregate()
                 soc = soc_tracker.get_soc()
 
-                print(f"  MPPT 平均: {agg['mppt_p_mean_mW']:.1f} mW "
-                      f"({agg['mppt_p_mean_kW']*1e6:.1f} μW = "
-                      f"{agg['mppt_p_mean_kW']*1e3:.4f} W = "
-                      f"{agg['mppt_p_mean_kW']:.7f} kW)")
-                print(f"  MPPT 最大: {agg['mppt_p_max_mW']:.1f} mW")
-                print(f"  MPPT 標準差: {agg['mppt_p_std_mW']:.1f} mW")
-                print(f"  電池電壓: {agg['batt_v_mean']:.2f} V")
-                print(f"  電池電流: {agg['batt_i_mean_ma']:.1f} mA")
-                print(f"  溫度: {agg['batt_temp_mean']:.1f} °C")
+                mppt_mw = agg['mppt_p_mean_mW']
+                print(f"  MPPT 平均: {mppt_mw:.1f} mW ({mppt_mw/1000:.4f} W)")
+                print(f"  MPPT 最大: {agg['mppt_p_max_mW']:.1f} mW  標準差: {agg['mppt_p_std_mW']:.1f} mW")
+                if agg['bus_p_mean_mW'] > 0:
+                    print(f"  MPPT-Bus: {agg['bus_p_mean_mW']:.1f} mW")
+                if agg['load_p_mean_mW'] > 0:
+                    print(f"  負載實測: {agg['load_p_mean_mW']:.1f} mW")
+                print(f"  電池功率: {agg['batt_p_mean_mW']:.1f} mW "
+                      f"(V={agg['batt_v_mean']:.2f}V, I={agg['batt_i_mean_ma']:.1f}mA)")
                 print(f"  完整度: {agg['completeness']*100:.0f}% ({agg['n_samples']} 筆)")
                 print(f"  SoC (自算): {soc*100:.1f}%")
 
@@ -834,9 +835,11 @@ def main():
                     'mppt_mean_mW': f'{agg["mppt_p_mean_mW"]:.2f}',
                     'mppt_max_mW': f'{agg["mppt_p_max_mW"]:.2f}',
                     'mppt_std_mW': f'{agg["mppt_p_std_mW"]:.2f}',
+                    'bus_p_mean_mW': f'{agg["bus_p_mean_mW"]:.2f}',
+                    'load_p_mean_mW': f'{agg["load_p_mean_mW"]:.2f}',
+                    'batt_p_mean_mW': f'{agg["batt_p_mean_mW"]:.2f}',
                     'batt_v_mean': f'{agg["batt_v_mean"]:.3f}',
                     'batt_i_mean_ma': f'{agg["batt_i_mean_ma"]:.1f}',
-                    'batt_temp_mean': f'{agg["batt_temp_mean"]:.1f}',
                     'n_samples': agg['n_samples'],
                     'completeness': f'{agg["completeness"]:.3f}',
                     'action_power_kw': f'{action_kw:.8f}',
