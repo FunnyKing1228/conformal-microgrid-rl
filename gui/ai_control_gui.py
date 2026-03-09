@@ -428,11 +428,9 @@ class AIControlGUI(tk.Tk):
         frm_info.pack(fill="x", padx=pad, pady=2)
 
         info_text = (
-            "  4組並聯 @ 20mA/cm², 73.96cm² 電極, 4串聯\n"
-            "  容量: 11833.6 mAh ≈ 66.28 Wh ≈ 0.06628 kWh\n"
-            "  最大功率: 33.12 W (8.28W × 4組)\n"
-            "  充電電壓: 8.5V  放電電壓: 5.6V\n"
-            "  效率: 85% RTE (η = √0.85 ≈ 0.922)\n"
+            "  容量: 11833.6 mAh = 66.28 Wh (模擬 4 組模組並聯)\n"
+            "  功率: 170 mW (P302 硬體極限: 20mA × 8.5V)\n"
+            "  充電: 8.5V  放電: 5.6V  效率: 85% RTE\n"
             "  Command.txt: 功率(mW) + 流速(0-100%) + Scenario(1-4)\n"
             "  Scenario: 1=放電全包 2=放電+市電 3=市電充電 4=待機"
         )

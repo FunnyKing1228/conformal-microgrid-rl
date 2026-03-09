@@ -46,11 +46,12 @@ OUT_DIR.mkdir(parents=True, exist_ok=True)
 # ═══════════════════════════════════════════════════════════════
 # 電池規格
 # ═══════════════════════════════════════════════════════════════
-# 情境一：4組並聯, 20 mA/cm², 73.96 cm², 4 串聯
+# 模擬 4 組模組並聯容量（依據 8Feb2025 規劃書）
+# 功率維持 P302 硬體極限: 20mA × 8.5V = 170mW
 BATTERY_CAPACITY_MAH  = 11833.6    # 4組總容量 (mAh)
 BATTERY_CHARGE_V      = 8.5        # V
 BATTERY_DISCHARGE_V   = 5.6        # V
-BATTERY_CHARGE_I_MA   = 5916.8     # mA（4組額定充電電流）
+BATTERY_CHARGE_I_MA   = 20.0       # mA（P302 硬體額定電流）
 BATTERY_CAPACITY_WH   = 66.28      # 4組總儲能 (Wh)
 BATTERY_CAPACITY_KWH  = BATTERY_CAPACITY_WH / 1000  # ≈ 0.06628 kWh
 

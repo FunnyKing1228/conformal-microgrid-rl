@@ -26,11 +26,11 @@ env:
   episode_length: 576
   time_step: 0.25               # 15分鐘 = 0.25小時
 
-  # P302 SLFB 電池規格（情境一：4組並聯, 20 mA/cm², 73.96 cm²）
-  # 4組總容量: 11833.6 mAh, 總儲能: 66.28 Wh
-  # 4組最大放電功率: 33.12 W（< 48W 負載，無法 Battery Solo）
+  # P302 SLFB 電池規格（模擬 4 組模組並聯容量，依據 8Feb2025 規劃書）
+  # 容量: 11833.6 mAh = 66.28 Wh（1.4792A × 2hr × 4組）
+  # 功率: P302 硬體極限 20mA × 8.5V = 170mW = 0.00017 kW
   battery_capacity_kwh: 0.06628
-  battery_power_kw: 0.03312
+  battery_power_kw: 0.00017
   battery_efficiency: 0.95       # 功率損耗 5%（不加噪音/lag 等 sim-to-real 設定）
 
   use_real_data: true
