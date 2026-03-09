@@ -471,9 +471,14 @@ def determine_situation(action_kw: float, load_kw: float, pv_kw: float) -> int:
     前提：太陽能優先供負載，不逆送市電。
     剩餘負載 = max(0, load - pv)
     
+    ★ 電壓約束：電池放電電壓(5.6V) < 市電轉換電壓，
+      因此電池只有在「市電不介入」時才能放電（和太陽能一起供電）。
+      → Scenario 2 名義上回傳 2，但物理上電池被壓住放不出電。
+      → 電池可以正常跟太陽能一起放電（只要太陽不是很強）。
+    
     情況碼：
-      1: 電池放電全包剩餘負載
-      2: 電池放電 + 市電補足
+      1: 電池放電全包剩餘負載（PV+電池 ≥ 負載，市電=0）
+      2: 電池放電 + 市電補足（★ 但電池電壓 < 市電 → 實際放不出電）
       3: 市電同時供負載及充電
       4: 電池待機（100% 市電供剩餘負載）
     """
@@ -482,9 +487,9 @@ def determine_situation(action_kw: float, load_kw: float, pv_kw: float) -> int:
     if action_kw < -0.0001:  # 放電
         discharge_kw = abs(action_kw)
         if discharge_kw >= net_load - 0.0001:
-            return 1
+            return 1  # PV + battery covers load, no grid needed
         else:
-            return 2
+            return 2  # Grid needed → battery physically blocked
     elif action_kw > 0.0001:  # 充電
         return 3
     else:

@@ -51,30 +51,41 @@ def get_taipower_tou_price(hour: int, is_weekend: bool) -> float:
         return 4.69   # Mid-Peak (Late)
 
 
-def determine_situation_code(action_kw: float, net_load_after_pv: float) -> int:
+def determine_situation_code(action_kw: float, net_load_after_pv: float,
+                             pv_kw: float = 0.0, load_kw: float = 0.0) -> int:
     """
     判定 P302 能流情況碼（1~4）用於 Command.txt。
     
     前提：PV 已優先供負載，net_load_after_pv = max(0, load - pv)。
     
+    ★ 電壓約束：電池放電電壓(5.6V) < 市電轉換電壓，
+      因此電池只有在「市電不介入」時才能放電。
+      → 電池+PV 必須 ≥ 負載，市電才不會啟動。
+      → 如果 PV+電池 < 負載 → 市電必須介入 → 電池被壓住 → 等同 Scenario 4。
+      → 但電池可以正常跟太陽能一起放電（只要太陽不是很強）。
+    
     情況碼：
-      1: Battery Solo  — 電池放電 ≥ 剩餘負載（市電=0）
-      2: Grid Support  — 電池放電 < 剩餘負載（市電補差額）
+      1: Battery Solo  — PV+電池放電 ≥ 負載（市電=0），電池有效放電
+      2: Grid Support  — 名義上電池放電+市電補，但物理上電池電壓 < 市電
+                         → 實際等同 Scenario 4（電池被壓住放不出電）
+                         ★ 模擬中仍回傳 2 供 Command.txt，但能流計算中放電被歸零
       3: Grid Charge   — 市電供負載 + 充電池
       4: Standby       — 電池不動作，市電供全部剩餘負載
     
     Args:
         action_kw: 電池動作（kW），正=充電，負=放電
         net_load_after_pv: PV 補完後的剩餘負載（kW）
+        pv_kw: PV 發電（kW），用於判斷電池是否可與 PV 共同供電
+        load_kw: 總負載（kW）
     Returns:
         1, 2, 3, or 4
     """
     if action_kw < -1e-6:  # Discharge
         discharge_kw = abs(action_kw)
         if net_load_after_pv > 1e-6 and discharge_kw >= net_load_after_pv * 0.99:
-            return 1  # Battery Solo
+            return 1  # Battery Solo (PV + battery covers load, no grid)
         else:
-            return 2  # Grid Support
+            return 2  # Grid Support (but physically battery may be blocked)
     elif action_kw > 1e-6:  # Charge
         return 3  # Grid Charge
     else:
@@ -1297,7 +1308,10 @@ class MicrogridEnvironment(gym.Env):
             reward -= 1.0 * ((0.15 - soc) / 0.05) ** 2  # 接近下界警告
         
         # ══════════════════════════════════════════════════════════
-        # 6. 放電超過負載 = 浪費（不可逆送市電）
+        # 6. 放電無效懲罰（電壓約束 + 逆送限制）
+        #    ★ 電池電壓(5.6V) < 市電 → 只要市電介入，電池就放不出電
+        #    → 只有 PV+電池 ≥ 負載 時放電才有效
+        #    → 其他情況放電是白費 SoC，要懲罰
         # ══════════════════════════════════════════════════════════
         if action_kw < 0:
             wasted = abs(action_kw) - useful_discharge
@@ -1577,12 +1591,22 @@ class MicrogridEnvironment(gym.Env):
         pv_to_load = min(pv_kw, load_kw)
         net_load_after_pv = max(0.0, load_kw - pv_kw)  # PV 不足的部分
         
-        # 電池動作影響（actual_net_power_kw 已扣除幫浦功耗且反映 SoC clamp）
-        # actual_net_power_kw > 0 → 充電（從市電買）, < 0 → 放電（減少市電）
-        if actual_net_power_kw < 0:  # 放電
+        # ★ 電壓約束：電池放電電壓(5.6V) < 市電轉換電壓
+        #   電池只有在「市電不介入」時才能放電（和太陽能一起供電）。
+        #   → 如果 PV+電池放電 ≥ 負載 → 市電不啟動 → 電池放電有效 (Scenario 1)
+        #   → 如果 PV+電池放電 < 負載 → 市電必須介入 → 電壓壓住電池 → 放電無效
+        #   充電不受影響（Scenario 3: 市電可正常充入電池）
+        voltage_blocked = False
+        if actual_net_power_kw < 0:  # 放電意圖
             discharge_kw = abs(actual_net_power_kw)
-            # 放電量不能超過剩餘負載（不可逆送市電）
-            useful_discharge = min(discharge_kw, net_load_after_pv)
+            # 檢查：PV + 電池放電 是否足夠覆蓋全部負載？
+            if (pv_kw + discharge_kw) >= load_kw * 0.99:
+                # PV + 電池 ≥ 負載 → 市電不介入 → 電池放電有效
+                useful_discharge = min(discharge_kw, net_load_after_pv)
+            else:
+                # PV + 電池 < 負載 → 市電必須介入 → 電池被壓住放不出電
+                useful_discharge = 0.0
+                voltage_blocked = True
             charge_kw = 0.0
         else:  # 充電或待機
             useful_discharge = 0.0
@@ -1641,7 +1665,8 @@ class MicrogridEnvironment(gym.Env):
             reward -= (penalty_per_kwh * energy_violate_kwh) / scale_guard
         
         # ── 情況碼（Scenario 1~4）──────────────────────────────────
-        situation_code = determine_situation_code(action_kw, net_load_after_pv)
+        situation_code = determine_situation_code(action_kw, net_load_after_pv,
+                                                  pv_kw=pv_kw, load_kw=load_kw)
         
         # 更新狀態
         self.current_step += 1
@@ -1672,6 +1697,7 @@ class MicrogridEnvironment(gym.Env):
             'baseline_grid_kw': baseline_grid_kw,
             'price': price,
             'situation_code': situation_code,
+            'voltage_blocked': voltage_blocked,
             'step': self.current_step,
             'load': load_kw,
             'pv': pv_kw,
