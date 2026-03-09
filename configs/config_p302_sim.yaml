@@ -26,12 +26,11 @@ env:
   episode_length: 576
   time_step: 0.25               # 15分鐘 = 0.25小時
 
-  # SLFB 電池規格（4組模組並聯，依據 8Feb2025 規劃書）
-  # 電流密度 20 mA/cm² × 73.96 cm² = 1.4792 A/組
-  # 容量: 1.4792A × 2hr × 4組 = 11833.6 mAh = 66.28 Wh
-  # 功率: 8.28W × 4組 = 33.13 W（> 32W 負載）
-  battery_capacity_kwh: 0.06628
-  battery_power_kw: 0.03313
+  # SLFB 電池規格（最終定案：系統電流 20mA，充放電 12hr）
+  # 功率: 5.6V × 0.02A = 0.112W
+  # 容量: 20mA × 12hr = 240 mAh = 1.344 Wh
+  battery_capacity_kwh: 0.001344
+  battery_power_kw: 0.000112
   battery_efficiency: 0.95       # 功率損耗 5%（不加噪音/lag 等 sim-to-real 設定）
 
   use_real_data: true
@@ -51,27 +50,26 @@ env:
   hard_guard: false
 
   # ── TOU Reward Scale（關鍵參數）─────────────────────────────────
-  # SLFB 電池 33.13W vs 32W 負載，套利空間有限，需要放大信號。
-  # 必須乘以大倍率讓 NN 梯度可學習。
-  # 計算：max savings/step = 0.03313kW × 0.25h × 7.13TWD = 0.0590 TWD
-  # 15 × 0.0590 ≈ 0.89 → 單步 reward ≈ [-1, +1] ✓
-  tou_reward_scale: 15
+  # SLFB 0.112W vs 32W 負載，電池只能微量削峰，需要大倍率放大信號。
+  # 計算：max savings/step = 0.000112kW × 0.25h × 7.13TWD = 0.0000200 TWD
+  # 50000 × 0.0000200 ≈ 1.0 → 單步 reward ≈ [-1, +1] ✓
+  tou_reward_scale: 50000
 
   # ── Flow Rate 電化學等效模型（SLFB 鋅空氣電池）────────────────────
   # 啟用 2D action space: [power_kw, flow_fraction]
   use_flow_rate_action: true
-  # 基線內阻 R_base = (V_charge - V_discharge) / (2 × I_single)
-  # = (8.5 - 5.6) / (2 × 1.4792) = 0.981 Ω
-  flow_R_base_ohm: 0.981
-  # 幫浦最大寄生功率 ≈ 15% 系統放電功率 = 33.13W × 0.15 = 4.97 W
-  flow_P_max_pump_W: 4.97
+  # 基線內阻 R_base = (V_charge - V_discharge) / (2 × I_rated)
+  # = (8.5 - 5.6) / (2 × 0.02) = 72.5 Ω
+  flow_R_base_ohm: 72.5
+  # 幫浦最大寄生功率 ≈ 15% 放電功率 = 0.112W × 0.15 = 16.8 mW
+  flow_P_max_pump_W: 0.0168
   # 內阻增幅因子（低流速 → 濃度極化 → 內阻飆升）
   flow_k_R: 0.5
   # 開路電壓
   flow_V_OCV_charge: 8.5
   flow_V_OCV_discharge: 5.6
-  # 額定電流（單組）
-  flow_I_rated_A: 1.4792
+  # 額定電流
+  flow_I_rated_A: 0.020
 
   # ── 擴充觀察空間 ────────────────────────────────────────────
   # 暫時關閉（SoH 資料在正式實驗前不夠精確）

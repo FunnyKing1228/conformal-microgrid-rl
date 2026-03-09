@@ -17,7 +17,7 @@ P302 真實硬體配置
   ・其餘       → 全由模擬運算
 
 RL 控制輸出（對應 Command.txt 格式 PP,功率(mW),流速,）：
-  ・功率 (power_mW)     : 電池充放電功率，0~33134 mW (4組系統)
+  ・功率 (power_mW)     : 電池充放電功率，0~112 mW (系統最大)
   ・流速 (flow_percent) : 電解液流速 0~100%
 
 Flow Rate 電化學等效模型（SLFB Synthetic Model）：
@@ -33,42 +33,37 @@ Flow Rate 電化學等效模型（SLFB Synthetic Model）：
 import os
 
 # ──────────────────────────────────────────────────────────────
-# 電池參數（SLFB 4組模組並聯系統，依據 8Feb2025 規劃書）
-# 核心參數：電流密度 20 mA/cm², 反應面積 73.96 cm², 充放電時間 2 hr
+# 電池參數（最終定案：系統電流 20mA，充放電 12hr）
 # ──────────────────────────────────────────────────────────────
-# [計算推導 1: 單組模組電流]
-# 算式: 20 mA/cm² * 73.96 cm² = 1479.2 mA = 1.4792 A
-# [計算推導 2: 單組模組功率]
-# 算式: 1.4792 A * 5.6 V = 8.28352 W
-BATTERY_N_MODULES       = 4              # 並聯模組數
-BATTERY_CAPACITY_MAH    = 11833.6        # (1.4792A * 2hr) * 4組 * 1000
+_SYSTEM_CURRENT_A       = 0.02           # 系統絕對電流 20 mA = 0.02 A
+DISCHARGE_HOURS         = 12.0           # 最高充放電時間 12 hr
 BATTERY_CHARGE_V        = 8.5            # V（充電電壓）
-BATTERY_DISCHARGE_V     = 5.6            # V（放電電壓 1.4V * 4串聯）
+BATTERY_DISCHARGE_V     = 5.6            # V（放電電壓 1.4V × 4串聯）
 BATTERY_AVG_V           = (BATTERY_CHARGE_V + BATTERY_DISCHARGE_V) / 2  # 7.05 V
-BATTERY_SINGLE_I_A      = 1.4792         # 單組電流 (A) = 20 mA/cm² * 73.96 cm²
-BATTERY_CHARGE_I_MA     = BATTERY_SINGLE_I_A * 1000  # 1479.2 mA（單組）
-BATTERY_CAPACITY_WH     = 66.28          # 16.57 Wh * 4組
-BATTERY_CAPACITY_KWH    = BATTERY_CAPACITY_WH / 1000   # ≈ 0.06628 kWh
-BATTERY_POWER_W         = BATTERY_SINGLE_I_A * BATTERY_DISCHARGE_V * BATTERY_N_MODULES  # 33.134 W
-BATTERY_POWER_KW        = BATTERY_POWER_W / 1000        # ≈ 0.03313 kW
+BATTERY_CHARGE_I_MA     = _SYSTEM_CURRENT_A * 1000  # 20.0 mA
+BATTERY_CAPACITY_MAH    = BATTERY_CHARGE_I_MA * DISCHARGE_HOURS  # 240.0 mAh
+BATTERY_CAPACITY_WH     = (_SYSTEM_CURRENT_A * BATTERY_DISCHARGE_V) * DISCHARGE_HOURS  # 1.344 Wh
+BATTERY_CAPACITY_KWH    = BATTERY_CAPACITY_WH / 1000   # 0.001344 kWh
+BATTERY_POWER_W         = _SYSTEM_CURRENT_A * BATTERY_DISCHARGE_V  # 0.112 W
+BATTERY_POWER_KW        = BATTERY_POWER_W / 1000        # 0.000112 kW
 BATTERY_EFFICIENCY      = 0.85           # 系統轉換效率
 
 # ──────────────────────────────────────────────────────────────
 # Flow Rate 電化學等效模型參數
 # ──────────────────────────────────────────────────────────────
-# 基線內阻 R_base = (V_charge - V_discharge) / (2 × I_single)
-# 算式: (8.5 - 5.6) / (2 * 1.4792) = 0.981 Ω
-FLOW_R_BASE_OHM         = (BATTERY_CHARGE_V - BATTERY_DISCHARGE_V) / (2 * BATTERY_SINGLE_I_A)
-# 幫浦最大寄生功率 ≈ 15% 系統放電功率
-# 算式: 33.134 W * 0.15 = 4.97 W
+# 基線內阻 R_base = (V_charge - V_discharge) / (2 × I_rated)
+# 算式: (8.5 - 5.6) / (2 × 0.02) = 72.5 Ω
+FLOW_R_BASE_OHM         = (BATTERY_CHARGE_V - BATTERY_DISCHARGE_V) / (2 * _SYSTEM_CURRENT_A)  # 72.5 Ω
+# 幫浦最大寄生功率 ≈ 15% 放電功率
+# 算式: 0.112 W × 0.15 = 0.0168 W (16.8 mW)
 FLOW_P_MAX_PUMP_W       = BATTERY_POWER_W * 0.15
 # 內阻增幅因子（可調超參）
 FLOW_K_R                = 0.5
 # 開路電壓（充放電基準）
 FLOW_V_OCV_CHARGE       = BATTERY_CHARGE_V     # 8.5 V
 FLOW_V_OCV_DISCHARGE    = BATTERY_DISCHARGE_V  # 5.6 V
-# 額定電流（單組）
-FLOW_I_RATED_A          = BATTERY_SINGLE_I_A   # 1.4792 A
+# 額定電流
+FLOW_I_RATED_A          = _SYSTEM_CURRENT_A    # 0.020 A
 
 # ──────────────────────────────────────────────────────────────
 # 負載參數
@@ -76,8 +71,10 @@ FLOW_I_RATED_A          = BATTERY_SINGLE_I_A   # 1.4792 A
 LOAD_GROUPS             = 4              # 組數
 LOAD_PER_GROUP_W        = 8.0            # 每組功率 (W)（廠商確認）
 LOAD_VOLTAGE            = 5.0            # V
-LOAD_MAX_W              = LOAD_GROUPS * LOAD_PER_GROUP_W   # 32 W
+LOAD_MAX_W              = LOAD_GROUPS * LOAD_PER_GROUP_W   # 32.0 W
 LOAD_MAX_KW             = LOAD_MAX_W / 1000                # 0.032 kW
+# 注意：BATTERY_POWER_W (0.112W) << LOAD_MAX_W (32W)
+# 電池不可能獨立供電（Scenario 1 不可行）
 
 # ──────────────────────────────────────────────────────────────
 # MPPT/PV 參數（從實測統計）

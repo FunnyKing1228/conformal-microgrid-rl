@@ -37,7 +37,7 @@ Data Flow:
 
 單位約定（SLFB 鋅空氣電池，P302 主控板）：
   - MPPT_P in Data.txt : mW（800 = 800 mW = 0.8 W）
-  - power in Command.txt : mW（33134 = 33134 mW = 33.13 W max）
+  - power in Command.txt : mW（112 = 112 mW = 0.112 W max）
   - flow in Command.txt  : %（25 = 25%）
   - 模型內部使用 kW
 
@@ -81,46 +81,34 @@ from io_protocol import (
 )
 
 # ══════════════════════════════════════════════════════════════════
-# 硬體常數設定（SLFB 4組模組並聯系統，P302 主控板）
-# 核心參數：電流密度 20 mA/cm², 反應面積 73.96 cm², 充放電時間 2 hr
+# 硬體常數設定（最終定案版：系統電流 20mA，充放電 12hr）
 # ══════════════════════════════════════════════════════════════════
-
-# [計算推導 1: 單組模組電流]
-# 公式: 電流密度 * 反應面積
-# 算式: 20 mA/cm² * 73.96 cm² = 1479.2 mA = 1.4792 A
-
-# [計算推導 2: 單組模組功率]
-# 公式: 單組電流 * 放電電壓
-# 算式: 1.4792 A * 5.6 V = 8.28352 W
-
 BATTERY_CHARGE_V      = 8.5         # V (單槽充電電壓維持 8.5V)
 BATTERY_DISCHARGE_V   = 5.6         # V (放電電壓 1.4V * 4串聯)
 
-# [系統總容量 (mAh)]
-# 公式: (單組電流 * 時間) * 4組 * 1000
-# 算式: (1.4792 A * 2 hr) * 4 * 1000 = 11833.6 mAh
-BATTERY_CAPACITY_MAH  = 11833.6
-
-# [系統總儲能 (Wh)]
-# 公式: 單組儲能 16.57 Wh * 4組 (或 單組功率 8.28W * 2hr * 4組)
-# 算式: 16.57 Wh * 4 = 66.28 Wh
-BATTERY_CAPACITY_WH   = 66.28
-BATTERY_CAPACITY_KWH  = 0.06628     # kWh
+# [系統電流與時間]
+_system_current_a     = 0.02        # 系統絕對電流 20 mA = 0.02 A
+DISCHARGE_HOURS       = 12.0        # 最高充放電時間 12 hr
 
 # [系統最大功率 (kW)]
-# 公式: 單組功率 * 4組 / 1000
-# 算式: 8.28352 W * 4 = 33.134 W -> 0.03313 kW
-BATTERY_PMAX_KW       = 0.03313     # 完美大於 32W 最大負載！
+# 算式: 5.6 V * 0.02 A = 0.112 W
+BATTERY_PMAX_KW       = (_system_current_a * BATTERY_DISCHARGE_V) / 1000  # 0.000112 kW
+
+# [系統總容量 (mAh & Wh)]
+# 算式: 20 mA * 12 hr = 240 mAh
+# 算式: 0.112 W * 12 hr = 1.344 Wh
+BATTERY_CAPACITY_MAH  = _system_current_a * 1000 * DISCHARGE_HOURS        # 240.0 mAh
+BATTERY_CAPACITY_WH   = (_system_current_a * BATTERY_DISCHARGE_V) * DISCHARGE_HOURS  # 1.344 Wh
+BATTERY_CAPACITY_KWH  = BATTERY_CAPACITY_WH / 1000                        # 0.001344 kWh
 
 BATTERY_EFFICIENCY    = 0.85        # 系統轉換效率
 
 # ══════════════════════════════════════════════════════════════════
 # 負載規格 (經廠商確認)
 # ══════════════════════════════════════════════════════════════════
-# [系統總負載 (W)]
 # 算式: 8.0 W * 4組 = 32.0 W
 LOAD_PER_GROUP_W      = 8.0         # 單組負載 (W)
-MAX_LOAD_GROUPS       = 4           # 總負載組數
+MAX_LOAD_GROUPS       = 4           # 總負載 32.0 W
 
 # 負載時刻表（0-4 組，每組 8W）
 LOAD_SCHEDULE = [

@@ -46,15 +46,15 @@ OUT_DIR.mkdir(parents=True, exist_ok=True)
 # ═══════════════════════════════════════════════════════════════
 # 電池規格
 # ═══════════════════════════════════════════════════════════════
-# SLFB 4組模組並聯系統（依據 8Feb2025 規劃書）
-# 電流密度 20 mA/cm² × 73.96 cm² = 1.4792 A/組
-# 單組功率: 1.4792A × 5.6V = 8.28W, 4組 = 33.13W
-BATTERY_CAPACITY_MAH  = 11833.6    # (1.4792A × 2hr) × 4組 × 1000
+# SLFB 電池（最終定案：系統電流 20mA，充放電 12hr）
+# 功率: 5.6V × 0.02A = 0.112W
+# 容量: 20mA × 12hr = 240 mAh = 1.344 Wh
+BATTERY_CAPACITY_MAH  = 240.0      # 20mA × 12hr
 BATTERY_CHARGE_V      = 8.5        # V
 BATTERY_DISCHARGE_V   = 5.6        # V
-BATTERY_CHARGE_I_MA   = 1479.2     # mA（單組電流 = 20 mA/cm² × 73.96 cm²）
-BATTERY_CAPACITY_WH   = 66.28      # 16.57 Wh × 4組
-BATTERY_CAPACITY_KWH  = BATTERY_CAPACITY_WH / 1000  # ≈ 0.06628 kWh
+BATTERY_CHARGE_I_MA   = 20.0       # mA（系統絕對電流）
+BATTERY_CAPACITY_WH   = 1.344      # 0.112W × 12hr
+BATTERY_CAPACITY_KWH  = BATTERY_CAPACITY_WH / 1000  # 0.001344 kWh
 
 # ═══════════════════════════════════════════════════════════════
 # 負載規格
