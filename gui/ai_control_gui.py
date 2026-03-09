@@ -8,7 +8,7 @@ P302 微電網 AI 控制介面 — CORAL Framework
   2. 太陽能測試 (收資料)  → control/solar_test_collect.py
   3. 待機 / 手動         → control/solar_test_collect.py (scenario 4)
 
-P302 鋅空氣電池規格（預設）：
+SLFB 鋅空氣電池規格（預設，P302 主控板）：
   容量  : 10 mAh ≈ 0.07 Wh
   充電  : 20 mA × 8.5V = 170 mW
   放電  : 20 mA × 5.6V = 112 mW
@@ -424,7 +424,7 @@ class AIControlGUI(tk.Tk):
         ttk.Entry(row_wd, textvariable=self.wd_interval_var, width=8).pack(side="left", padx=4)
 
         # ── P302 電池規格 (唯讀資訊) ──
-        frm_info = ttk.LabelFrame(scrollable, text="P302 SLFB 電池規格 (參考)")
+        frm_info = ttk.LabelFrame(scrollable, text="SLFB 電池規格 (參考)")
         frm_info.pack(fill="x", padx=pad, pady=2)
 
         info_text = (

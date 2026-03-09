@@ -165,7 +165,7 @@ class MicrogridEnvironment(gym.Env):
         # 額定電流
         flow_I_rated_A: float = 0.020,        # A（20 mA）
         # ── TOU Reward Scale ────────────────────────────────────────────
-        # 因為 P302 電池極小（0.07 Wh），絕對套利利潤在微元級，
+        # 因為 SLFB 電池功率極小（170 mW），絕對套利利潤在微元級，
         # 必須乘以大倍率讓 NN 梯度可學習。
         # 預設 3000 使得單步 reward ≈ [-1, +1]
         tou_reward_scale: float = 3000.0,
