@@ -268,7 +268,7 @@ class SACAgent:
             alpha_loss.backward()
             self.alpha_optimizer.step()
             # ★ Clamp log_alpha: exp(-5)≈0.007, exp(0)=1.0
-            # SLFB 電池功率極小（170mW），有效動作範圍窄，alpha 不需要太高
+            # SLFB 4組系統 33.13W，有效動作範圍窄，alpha 不需要太高
             with torch.no_grad():
                 self.log_alpha.clamp_(min=-5.0, max=0.0)
             self.alpha = self.log_alpha.exp()

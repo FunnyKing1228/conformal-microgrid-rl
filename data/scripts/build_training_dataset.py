@@ -46,13 +46,14 @@ OUT_DIR.mkdir(parents=True, exist_ok=True)
 # ═══════════════════════════════════════════════════════════════
 # 電池規格
 # ═══════════════════════════════════════════════════════════════
-# 模擬 4 組模組並聯容量（依據 8Feb2025 規劃書）
-# 功率維持 P302 硬體極限: 20mA × 8.5V = 170mW
-BATTERY_CAPACITY_MAH  = 11833.6    # 4組總容量 (mAh)
+# SLFB 4組模組並聯系統（依據 8Feb2025 規劃書）
+# 電流密度 20 mA/cm² × 73.96 cm² = 1.4792 A/組
+# 單組功率: 1.4792A × 5.6V = 8.28W, 4組 = 33.13W
+BATTERY_CAPACITY_MAH  = 11833.6    # (1.4792A × 2hr) × 4組 × 1000
 BATTERY_CHARGE_V      = 8.5        # V
 BATTERY_DISCHARGE_V   = 5.6        # V
-BATTERY_CHARGE_I_MA   = 20.0       # mA（P302 硬體額定電流）
-BATTERY_CAPACITY_WH   = 66.28      # 4組總儲能 (Wh)
+BATTERY_CHARGE_I_MA   = 1479.2     # mA（單組電流 = 20 mA/cm² × 73.96 cm²）
+BATTERY_CAPACITY_WH   = 66.28      # 16.57 Wh × 4組
 BATTERY_CAPACITY_KWH  = BATTERY_CAPACITY_WH / 1000  # ≈ 0.06628 kWh
 
 # ═══════════════════════════════════════════════════════════════

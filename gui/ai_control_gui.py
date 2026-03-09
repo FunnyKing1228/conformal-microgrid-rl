@@ -10,7 +10,7 @@ P302 微電網 AI 控制介面 — CORAL Framework
 
 SLFB 鋅空氣電池規格（預設，P302 主控板）：
   容量  : 10 mAh ≈ 0.07 Wh
-  充電  : 20 mA × 8.5V = 170 mW
+  功率  : 8.28W × 4組 = 33.13W (20mA/cm² × 73.96cm² = 1.4792A/組)
   放電  : 20 mA × 5.6V = 112 mW
   效率  : 85% RTE
 """
@@ -428,8 +428,9 @@ class AIControlGUI(tk.Tk):
         frm_info.pack(fill="x", padx=pad, pady=2)
 
         info_text = (
-            "  容量: 11833.6 mAh = 66.28 Wh (模擬 4 組模組並聯)\n"
-            "  功率: 170 mW (P302 硬體極限: 20mA × 8.5V)\n"
+            "  SLFB 4組並聯: 20mA/cm² × 73.96cm² = 1.4792A/組\n"
+            "  容量: 11833.6 mAh = 66.28 Wh\n"
+            "  功率: 8.28W × 4 = 33.13W (> 32W 負載)\n"
             "  充電: 8.5V  放電: 5.6V  效率: 85% RTE\n"
             "  Command.txt: 功率(mW) + 流速(0-100%) + Scenario(1-4)\n"
             "  Scenario: 1=放電全包 2=放電+市電 3=市電充電 4=待機"
