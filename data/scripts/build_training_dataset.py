@@ -9,7 +9,7 @@ build_training_dataset.py
   ・CSV 中只取 MPPT（太陽能）數據 — 這是真實的可再生能源時間序列
   ・CSV 中的電池欄位（soc_percent, voltage_v, current_a）為不同規格的電池，不使用
   ・SoC / SoH / Flow Rate 全由模擬計算，不依賴 CSV 電池數據
-  ・負載由我們透過 load_pattern 控制（0-4 組 × 12W）
+  ・負載由我們透過 load_pattern 控制（0-4 組 × 8W）
 
 電池規格（目標鋅空氣電池，模擬用）：
   - 額定容量      : 10 mAh
@@ -57,7 +57,7 @@ BATTERY_CAPACITY_KWH  = BATTERY_CAPACITY_WH / 1000  # ≈ 0.06628 kWh
 # ═══════════════════════════════════════════════════════════════
 # 負載規格
 # ═══════════════════════════════════════════════════════════════
-LOAD_PER_GROUP_W = 12.0   # W
+LOAD_PER_GROUP_W = 8.0    # W (vendor confirmed)
 LOAD_VOLTAGE     = 5.0    # V
 MAX_GROUPS       = 4
 
@@ -415,7 +415,7 @@ def plot_training_summary(df_raw: pd.DataFrame, df_agg: pd.DataFrame):
     ax1.set_ylim(-0.5, 4.5)
     ax1.set_yticks([0, 1, 2, 3, 4])
     ax1.grid(alpha=0.3)
-    ax1.set_title('Load Pattern (controlled, 0-4 groups × 12W)')
+    ax1.set_title('Load Pattern (controlled, 0-4 groups × 8W)')
 
     # SoC（被動充電模擬）
     ax2.plot(df_raw['timestamp'], df_raw['soc_estimated'] * 100, color='#4682B4', linewidth=0.8)

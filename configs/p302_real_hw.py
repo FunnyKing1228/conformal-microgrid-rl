@@ -6,7 +6,7 @@ P302 真實硬體配置
 硬體規格：
   ・電池     : 鋅空氣電池 (SLFB), 10 mAh, 充電 8.5V / 放電 5.6V, 額定電流 20 mA
   ・MPPT     : 峰值 ~1.75 W (實測), 典型日間 700-800 mW
-  ・電子負載  : 4 組 × 12W @5V (最大 48W)
+  ・電子負載  : 4 組 × 8W (最大 32W)（廠商確認每組 8W）
   ・採樣間隔  : ~11 秒 → 聚合為 15 分鐘窗格
 
 資料來源：
@@ -71,7 +71,7 @@ FLOW_I_RATED_A          = _SINGLE_MODULE_I_A   # 1.4792 A
 # 負載參數
 # ──────────────────────────────────────────────────────────────
 LOAD_GROUPS             = 4              # 組數
-LOAD_PER_GROUP_W        = 12.0           # 每組功率 (W)
+LOAD_PER_GROUP_W        = 8.0            # 每組功率 (W)（廠商確認）
 LOAD_VOLTAGE            = 5.0            # V
 LOAD_MAX_W              = LOAD_GROUPS * LOAD_PER_GROUP_W   # 48 W
 LOAD_MAX_KW             = LOAD_MAX_W / 1000                # 0.048 kW

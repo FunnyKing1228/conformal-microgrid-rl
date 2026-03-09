@@ -96,7 +96,7 @@ BATTERY_PMAX_KW       = 0.03312     # 33.12 W / 1000 (4組最大放電功率)
 BATTERY_EFFICIENCY    = 0.85
 
 # 負載規格
-LOAD_PER_GROUP_W = 12.0   # W per group
+LOAD_PER_GROUP_W = 8.0    # W per group (vendor confirmed)
 MAX_LOAD_GROUPS  = 4
 
 # 負載時刻表（0-4 組，每組 12W @5V）

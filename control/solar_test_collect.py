@@ -289,7 +289,7 @@ def main():
     print('  P302 Solar-Only Data Collection')
     print('=' * 70)
     print(f'  Scenario  : {args.scenario} ({"Standby" if args.scenario == 4 else "S" + str(args.scenario)})')
-    print(f'  Load      : {args.load_count} groups ({args.load_count * 12}W)')
+    print(f'  Load      : {args.load_count} groups ({args.load_count * 8}W)')
     print(f'  Battery   : PP={pp}, Power=0mW, Flow=0%')
     print(f'  Data.txt  : {os.path.abspath(args.data_file)}')
     print(f'  Command   : {os.path.abspath(args.command_file)}')
@@ -335,7 +335,7 @@ def main():
             if load is not None:
                 load_power_w = load['load_p_mw'] / 1000.0  # mW → W
             else:
-                load_power_w = args.load_count * 12.0  # 每組 12W @5V (估計)
+                load_power_w = args.load_count * 8.0   # 每組 8W (廠商確認)
 
             row = {
                 'timestamp': now.strftime('%Y-%m-%d %H:%M:%S'),

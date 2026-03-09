@@ -383,7 +383,7 @@ class AIControlGUI(tk.Tk):
         self.load_count_var = tk.StringVar(value=str(self.config.get("load_count", 4)))
         ttk.Spinbox(row_load, from_=0, to=4, textvariable=self.load_count_var,
                      width=5).pack(side="left", padx=4)
-        ttk.Label(row_load, text="(每組 12W @5V，4 組 = 48W)").pack(side="left")
+        ttk.Label(row_load, text="(每組 8W，4 組 = 32W)").pack(side="left")
 
         # 電池 PP ID
         row_pp = ttk.Frame(frm_common)
