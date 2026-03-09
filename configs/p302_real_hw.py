@@ -33,33 +33,39 @@ Flow Rate 電化學等效模型（SLFB Synthetic Model）：
 import os
 
 # ──────────────────────────────────────────────────────────────
-# 電池參數
+# 電池參數（情境一：4組模組並聯, 20 mA/cm², 73.96 cm² 電極面積, 4 串聯）
+# 單模組電流: 20 mA/cm² × 73.96 cm² = 1479.2 mA = 1.4792 A
+# 單模組放電功率: 1.4792 A × 5.6 V = 8.28 W
+# 4 組並聯: 33.12 W, 11833.6 mAh, 66.28 Wh
 # ──────────────────────────────────────────────────────────────
-BATTERY_CAPACITY_MAH    = 10.0           # mAh
-BATTERY_CHARGE_V        = 8.5            # V（充電電壓）
-BATTERY_DISCHARGE_V     = 5.6            # V（放電電壓）
+BATTERY_N_MODULES       = 4              # 並聯模組數
+BATTERY_CAPACITY_MAH    = 11833.6        # 4組總容量 (mAh)
+BATTERY_CHARGE_V        = 8.5            # V（充電電壓, 4串聯）
+BATTERY_DISCHARGE_V     = 5.6            # V（放電電壓, 4串聯）
 BATTERY_AVG_V           = (BATTERY_CHARGE_V + BATTERY_DISCHARGE_V) / 2  # 7.05 V
-BATTERY_CHARGE_I_MA     = 20.0           # mA（額定充電電流）
-BATTERY_CAPACITY_WH     = BATTERY_CAPACITY_MAH * BATTERY_AVG_V / 1000   # ≈ 0.0705 Wh
-BATTERY_CAPACITY_KWH    = BATTERY_CAPACITY_WH / 1000                     # ≈ 7.05e-5 kWh
-BATTERY_POWER_W         = BATTERY_CHARGE_I_MA * BATTERY_CHARGE_V / 1000  # ≈ 0.17 W
-BATTERY_POWER_KW        = BATTERY_POWER_W / 1000                         # ≈ 1.7e-4 kW
+BATTERY_CHARGE_I_MA     = 1479.2 * BATTERY_N_MODULES  # 5916.8 mA（4組）
+BATTERY_CAPACITY_WH     = 66.28          # 4組總儲能 (Wh)
+BATTERY_CAPACITY_KWH    = BATTERY_CAPACITY_WH / 1000   # ≈ 0.06628 kWh
+BATTERY_POWER_W         = 33.12          # 4組最大放電功率 (W)
+BATTERY_POWER_KW        = BATTERY_POWER_W / 1000        # ≈ 0.03312 kW
 BATTERY_EFFICIENCY      = 0.85           # 鋅空氣電池充放電基礎效率（保守估計）
 
 # ──────────────────────────────────────────────────────────────
 # Flow Rate 電化學等效模型參數
 # ──────────────────────────────────────────────────────────────
-# 基線內阻 R_base = (V_charge - V_discharge) / (2 × I_rated)
-FLOW_R_BASE_OHM         = (BATTERY_CHARGE_V - BATTERY_DISCHARGE_V) / (2 * BATTERY_CHARGE_I_MA / 1000)  # 72.5 Ω
+# 基線內阻 R_base = (V_charge - V_discharge) / (2 × I_rated_per_module)
+# 單模組電流 = 1.4792 A，4 組系統內阻按並聯計算
+_SINGLE_MODULE_I_A      = 1.4792
+FLOW_R_BASE_OHM         = (BATTERY_CHARGE_V - BATTERY_DISCHARGE_V) / (2 * _SINGLE_MODULE_I_A)  # ≈ 0.98 Ω
 # 幫浦最大寄生功率 ≈ 15% 放電功率
-FLOW_P_MAX_PUMP_W       = (BATTERY_DISCHARGE_V * BATTERY_CHARGE_I_MA / 1000) * 0.15  # 0.0168 W (16.8 mW)
+FLOW_P_MAX_PUMP_W       = BATTERY_POWER_W * 0.15  # ≈ 4.97 W
 # 內阻增幅因子（可調超參）
 FLOW_K_R                = 0.5
 # 開路電壓（充放電基準）
 FLOW_V_OCV_CHARGE       = BATTERY_CHARGE_V     # 8.5 V
 FLOW_V_OCV_DISCHARGE    = BATTERY_DISCHARGE_V  # 5.6 V
-# 額定電流
-FLOW_I_RATED_A          = BATTERY_CHARGE_I_MA / 1000  # 0.020 A
+# 額定電流（單模組）
+FLOW_I_RATED_A          = _SINGLE_MODULE_I_A   # 1.4792 A
 
 # ──────────────────────────────────────────────────────────────
 # 負載參數

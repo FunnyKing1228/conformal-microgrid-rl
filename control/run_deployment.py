@@ -83,12 +83,16 @@ from io_protocol import (
 # ══════════════════════════════════════════════════════════════════
 # 常數（P302 鋅空氣電池規格）
 # ══════════════════════════════════════════════════════════════════
-BATTERY_CAPACITY_MAH  = 10.0        # mAh
-BATTERY_CHARGE_V      = 8.5         # V
-BATTERY_DISCHARGE_V   = 5.6         # V
-BATTERY_CAPACITY_WH   = BATTERY_CAPACITY_MAH * (BATTERY_CHARGE_V + BATTERY_DISCHARGE_V) / 2 / 1000
-BATTERY_CAPACITY_KWH  = BATTERY_CAPACITY_WH / 1000   # ≈ 0.00007 kWh
-BATTERY_PMAX_KW       = 0.00017     # 20mA × 8.5V = 170mW = 0.00017 kW
+# 4 組模組並聯, 20 mA/cm², 73.96 cm² 電極面積, 4 串聯
+# 單模組電流: 20 mA/cm² × 73.96 cm² = 1479.2 mA = 1.4792 A
+# 單模組放電功率: 1.4792 A × 5.6 V = 8.28 W
+# 4 組並聯: 33.12 W, 11833.6 mAh, 66.28 Wh
+BATTERY_CAPACITY_MAH  = 11833.6     # 4組總容量 (mAh)
+BATTERY_CHARGE_V      = 8.5         # V (1.4V×4串×1.52充電比)
+BATTERY_DISCHARGE_V   = 5.6         # V (1.4V×4串)
+BATTERY_CAPACITY_WH   = 66.28       # 4組總儲能 (Wh)
+BATTERY_CAPACITY_KWH  = BATTERY_CAPACITY_WH / 1000   # ≈ 0.06628 kWh
+BATTERY_PMAX_KW       = 0.03312     # 33.12 W / 1000 (4組最大放電功率)
 BATTERY_EFFICIENCY    = 0.85
 
 # 負載規格

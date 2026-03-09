@@ -428,9 +428,10 @@ class AIControlGUI(tk.Tk):
         frm_info.pack(fill="x", padx=pad, pady=2)
 
         info_text = (
-            "  容量: 10 mAh ≈ 0.07 Wh ≈ 0.00007 kWh\n"
-            "  充電: 20 mA × 8.5V = 170 mW = 0.00017 kW\n"
-            "  放電: 20 mA × 5.6V = 112 mW\n"
+            "  4組並聯 @ 20mA/cm², 73.96cm² 電極, 4串聯\n"
+            "  容量: 11833.6 mAh ≈ 66.28 Wh ≈ 0.06628 kWh\n"
+            "  最大功率: 33.12 W (8.28W × 4組)\n"
+            "  充電電壓: 8.5V  放電電壓: 5.6V\n"
             "  效率: 85% RTE (η = √0.85 ≈ 0.922)\n"
             "  Command.txt: 功率(mW) + 流速(0-100%) + Scenario(1-4)\n"
             "  Scenario: 1=放電全包 2=放電+市電 3=市電充電 4=待機"

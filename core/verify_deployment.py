@@ -37,7 +37,7 @@ from control.io_protocol import (
 
 # ── 常數 ─────────────────────────────────────────────────────────
 MODEL_PATH = os.path.join(PROJECT_ROOT, 'experiments', 'p302_sim_v1', 'models', 'best_sac_model.pth')
-PMAX_KW = 0.00017        # P302 最大功率
+PMAX_KW = 0.03312        # P302 最大功率 (4組並聯 33.12W)
 STATE_DIM = 6             # [soc, load, pv, price, hour, dow]
 ACTION_DIM = 1            # [power_norm]
 HIDDEN_DIM = 128          # 訓練時用的 hidden_dim
@@ -269,7 +269,7 @@ if agent:
     sim_soc = 0.5  # 初始 SoC
     sim_load_kw = 0.020   # 20W 負載
     sim_pv_base_kw = 0.001  # 1W 基準太陽能
-    battery_cap_kwh = 0.00007
+    battery_cap_kwh = 0.06628  # 4組並聯 66.28 Wh
     time_step_h = 0.25  # 15 分鐘
 
     soc_history = [sim_soc]
@@ -406,10 +406,10 @@ for test_step in [0, 4, 8, 48, 95]:
           computed_hour == expected_hour)
 
 # 驗證 P302 功率尺度
-check(f"battery_capacity = {battery_cap_kwh*1e6:.1f}µWh = 0.07 Wh",
-      abs(battery_cap_kwh - 0.00007) < 1e-9)
-check(f"battery_power_max = {PMAX_KW*1e6:.0f}µW = 0.17 mW",
-      abs(PMAX_KW - 0.00017) < 1e-9)
+check(f"battery_capacity = {battery_cap_kwh*1000:.2f} Wh = 66.28 Wh",
+      abs(battery_cap_kwh - 0.06628) < 1e-4)
+check(f"battery_power_max = {PMAX_KW*1000:.2f} W = 33.12 W",
+      abs(PMAX_KW - 0.03312) < 1e-4)
 
 print()
 

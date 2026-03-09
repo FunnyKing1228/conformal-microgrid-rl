@@ -46,12 +46,13 @@ OUT_DIR.mkdir(parents=True, exist_ok=True)
 # ═══════════════════════════════════════════════════════════════
 # 電池規格
 # ═══════════════════════════════════════════════════════════════
-BATTERY_CAPACITY_MAH  = 10.0       # mAh
+# 情境一：4組並聯, 20 mA/cm², 73.96 cm², 4 串聯
+BATTERY_CAPACITY_MAH  = 11833.6    # 4組總容量 (mAh)
 BATTERY_CHARGE_V      = 8.5        # V
 BATTERY_DISCHARGE_V   = 5.6        # V
-BATTERY_CHARGE_I_MA   = 20.0       # mA（額定充電電流）
-BATTERY_CAPACITY_WH   = BATTERY_CAPACITY_MAH * (BATTERY_CHARGE_V + BATTERY_DISCHARGE_V) / 2 / 1000  # ≈ 0.0705 Wh
-BATTERY_CAPACITY_KWH  = BATTERY_CAPACITY_WH / 1000
+BATTERY_CHARGE_I_MA   = 5916.8     # mA（4組額定充電電流）
+BATTERY_CAPACITY_WH   = 66.28      # 4組總儲能 (Wh)
+BATTERY_CAPACITY_KWH  = BATTERY_CAPACITY_WH / 1000  # ≈ 0.06628 kWh
 
 # ═══════════════════════════════════════════════════════════════
 # 負載規格
