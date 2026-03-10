@@ -46,7 +46,7 @@ a = Analysis(
     hiddenimports=[
         'tkinter', 'tkinter.ttk', 'tkinter.messagebox',
         'tkinter.filedialog', 'tkinter.scrolledtext',
-        'torch', 'numpy', 'yaml', 'gymnasium',
+        'torch', 'numpy', 'yaml',
         'csv', 'json', 'argparse',
         # core modules that deployment script imports
         'core.sac_agent', 'core.microgrid_env', 'core.safety_net',
@@ -60,11 +60,32 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
-        'matplotlib',  # GUI 本身不需要畫圖
-        'scipy',
-        'pandas',
-        'IPython', 'notebook', 'jupyter',
-        'PIL', 'torchaudio', 'torchvision',
+        # 繪圖/科學計算（部署不需要）
+        'matplotlib', 'scipy', 'pandas', 'PIL', 'Pillow',
+        'plotly', 'bokeh', 'altair', 'seaborn', 'holoviews',
+        'skimage', 'sklearn', 'scikit-learn', 'scikit-image',
+        # Jupyter/IPython
+        'IPython', 'notebook', 'jupyter', 'jupyter_core',
+        'jupyter_client', 'jupyter_server', 'jupyterlab',
+        'nbconvert', 'nbformat', 'ipykernel', 'ipywidgets',
+        # Torch 擴展
+        'torchaudio', 'torchvision', 'torchtext',
+        # Qt（我們用 tkinter）
+        'PyQt5', 'PyQt6', 'PySide2', 'PySide6', 'sip',
+        # Sphinx/文件
+        'sphinx', 'sphinxcontrib', 'docutils', 'alabaster',
+        # 其他不需要的
+        'lxml', 'pygments', 'pytest', 'setuptools', '_pytest',
+        'pyviz_comms', 'panel', 'param', 'intake', 'dask',
+        'distributed', 'fsspec', 'cytoolz', 'toolz',
+        'numba', 'llvmlite', 'cffi', 'cryptography', 'bcrypt',
+        'zmq', 'tornado', 'jinja2', 'markupsafe',
+        'chardet', 'charset_normalizer', 'certifi', 'urllib3',
+        'requests', 'httpx', 'aiohttp',
+        'h5py', 'tables', 'xlrd', 'openpyxl',
+        'sympy', 'astropy', 'statsmodels',
+        'conda', 'anaconda_navigator',
+        'gymnasium', 'gym', 'pygame', 'box2d',
     ],
     noarchive=False,
     optimize=0,
