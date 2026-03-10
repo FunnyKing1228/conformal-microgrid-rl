@@ -176,7 +176,7 @@ class MicrogridEnvironment(gym.Env):
         # 額定電流
         flow_I_rated_A: float = 0.020,        # A（20 mA）
         # ── TOU Reward Scale ────────────────────────────────────────────
-        # SLFB 0.112W vs 32W 負載，電池只能微量削峰，
+        # SLFB 0.280W vs 負載，電池可做小量削峰，
         # 必須乘以大倍率讓 NN 梯度可學習。
         # 預設 3000 使得單步 reward ≈ [-1, +1]
         tou_reward_scale: float = 3000.0,

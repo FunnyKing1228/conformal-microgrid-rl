@@ -22,20 +22,20 @@ device: "auto"   # auto / cpu / cuda
 # ── 環境參數（與 P302 實體規格一致）────────────────────────────────
 env:
   microgrid_id: 0
-  # 576 步 = 6天 × 96步/天（15分鐘一步），與 training CSV 筆數一致
-  episode_length: 576
+  # 394 步 = 5天 Mar 5-9 實測資料（15分鐘一步），3/5 和 3/9 不完整
+  episode_length: 394
   time_step: 0.25               # 15分鐘 = 0.25小時
 
-  # SLFB 電池規格（最終定案：系統電流 20mA，充放電 12hr）
-  # 功率: 5.6V × 0.02A = 0.112W
-  # 容量: 20mA × 12hr = 240 mAh = 1.344 Wh
-  battery_capacity_kwh: 0.001344
-  battery_power_kw: 0.000112
+  # SLFB 電池規格（系統電流 50mA，充放電 12hr）
+  # 功率: 5.6V × 0.05A = 0.280W
+  # 容量: 50mA × 12hr = 600 mAh = 3.36 Wh
+  battery_capacity_kwh: 0.00336
+  battery_power_kw: 0.000280
   battery_efficiency: 0.95       # 功率損耗 5%（不加噪音/lag 等 sim-to-real 設定）
 
   use_real_data: true
-  # 使用處理好的 6 天 15 分鐘 CSV（相對於 core/ 目錄）
-  dataset_csv_path: "../data/processed/training_7day_15min.csv"
+  # 使用處理好的 5 天 15 分鐘 CSV（Mar 5-9 實測太陽能）
+  dataset_csv_path: "data/processed/training_7day_15min.csv"
   dataset_pv_join_wind: false
 
   # CSV 欄位映射
@@ -50,26 +50,26 @@ env:
   hard_guard: false
 
   # ── TOU Reward Scale（關鍵參數）─────────────────────────────────
-  # SLFB 0.112W vs 32W 負載，電池只能微量削峰，需要大倍率放大信號。
-  # 計算：max savings/step = 0.000112kW × 0.25h × 7.13TWD = 0.0000200 TWD
-  # 50000 × 0.0000200 ≈ 1.0 → 單步 reward ≈ [-1, +1] ✓
-  tou_reward_scale: 50000
+  # SLFB 0.280W，電池可做小量削峰。
+  # 計算：max savings/step = 0.000280kW × 0.25h × 7.13TWD = 0.0000499 TWD
+  # 20000 × 0.0000499 ≈ 1.0 → 單步 reward ≈ [-1, +1] ✓
+  tou_reward_scale: 20000
 
   # ── Flow Rate 電化學等效模型（SLFB 鋅空氣電池）────────────────────
   # 啟用 2D action space: [power_kw, flow_fraction]
   use_flow_rate_action: true
   # 基線內阻 R_base = (V_charge - V_discharge) / (2 × I_rated)
-  # = (8.5 - 5.6) / (2 × 0.02) = 72.5 Ω
-  flow_R_base_ohm: 72.5
-  # 幫浦最大寄生功率 ≈ 15% 放電功率 = 0.112W × 0.15 = 16.8 mW
-  flow_P_max_pump_W: 0.0168
+  # = (8.5 - 5.6) / (2 × 0.05) = 29.0 Ω
+  flow_R_base_ohm: 29.0
+  # 幫浦最大寄生功率 ≈ 15% 放電功率 = 0.280W × 0.15 = 42 mW
+  flow_P_max_pump_W: 0.042
   # 內阻增幅因子（低流速 → 濃度極化 → 內阻飆升）
   flow_k_R: 0.5
   # 開路電壓
   flow_V_OCV_charge: 8.5
   flow_V_OCV_discharge: 5.6
   # 額定電流
-  flow_I_rated_A: 0.020
+  flow_I_rated_A: 0.050
 
   # ── 擴充觀察空間 ────────────────────────────────────────────
   # 暫時關閉（SoH 資料在正式實驗前不夠精確）
@@ -93,7 +93,7 @@ sac:
 # ── 訓練設定 ────────────────────────────────────────────────────
 training:
   total_episodes: 2000          # 2000 集（每集 576 步 = ~115萬步總量）
-  max_steps: 576                # 與 episode_length 一致
+  max_steps: 394                # 與 episode_length 一致
   eval_every: 25                # 每 25 集評估一次（更頻繁看進度）
   eval_episodes: 3              # 評估時跑 3 集取平均
   save_every: 100               # 每 100 集存 checkpoint

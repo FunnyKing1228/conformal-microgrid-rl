@@ -9,13 +9,15 @@ build_training_dataset.py
   ・CSV 中只取 MPPT（太陽能）數據 — 這是真實的可再生能源時間序列
   ・CSV 中的電池欄位（soc_percent, voltage_v, current_a）為不同規格的電池，不使用
   ・SoC / SoH / Flow Rate 全由模擬計算，不依賴 CSV 電池數據
-  ・負載由我們透過 load_pattern 控制（0-4 組 × 8W）
+  ・  負載由我們透過 load_pattern 控制（0-4 組 × 100mW）
 
-電池規格（目標鋅空氣電池，模擬用）：
-  - 額定容量      : 10 mAh
-  - 充電電流      : 20 mA
+電池規格（SLFB 鋅空氣電池）：
+  - 系統電流      : 50 mA
+  - 充放電時間    : 12 hr
   - 充電電壓      : 8.5 V
   - 放電電壓      : 5.6 V
+  - 功率          : 280 mW
+  - 容量          : 600 mAh = 3.36 Wh
 
 RL 控制輸出：
   - 功率 (power_mW)     : 充放電功率
@@ -26,10 +28,11 @@ RL 控制輸出：
 
 import os
 import sys
+import argparse
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from datetime import datetime, time as dtime
+from datetime import datetime, time as dtime, date as ddate
 
 # Windows 相容
 if sys.platform == 'win32':
@@ -46,33 +49,26 @@ OUT_DIR.mkdir(parents=True, exist_ok=True)
 # ═══════════════════════════════════════════════════════════════
 # 電池規格
 # ═══════════════════════════════════════════════════════════════
-# SLFB 電池（最終定案：系統電流 20mA，充放電 12hr）
-# 功率: 5.6V × 0.02A = 0.112W
-# 容量: 20mA × 12hr = 240 mAh = 1.344 Wh
-BATTERY_CAPACITY_MAH  = 240.0      # 20mA × 12hr
+# SLFB 電池（系統電流 50mA，充放電 12hr）
+# 功率: 5.6V × 0.05A = 0.280W
+# 容量: 50mA × 12hr = 600 mAh = 3.36 Wh
+BATTERY_CAPACITY_MAH  = 600.0      # 50mA × 12hr
 BATTERY_CHARGE_V      = 8.5        # V
 BATTERY_DISCHARGE_V   = 5.6        # V
-BATTERY_CHARGE_I_MA   = 20.0       # mA（系統絕對電流）
-BATTERY_CAPACITY_WH   = 1.344      # 0.112W × 12hr
-BATTERY_CAPACITY_KWH  = BATTERY_CAPACITY_WH / 1000  # 0.001344 kWh
+BATTERY_CHARGE_I_MA   = 50.0       # mA（系統電流）
+BATTERY_CAPACITY_WH   = 3.36       # 0.280W × 12hr
+BATTERY_CAPACITY_KWH  = BATTERY_CAPACITY_WH / 1000  # 0.00336 kWh
 
 # ═══════════════════════════════════════════════════════════════
 # 負載規格
 # ═══════════════════════════════════════════════════════════════
-LOAD_PER_GROUP_W = 8.0    # W (vendor confirmed)
+LOAD_PER_GROUP_W = 0.1    # W (100mW per group, measured avg)
 LOAD_VOLTAGE     = 5.0    # V
 MAX_GROUPS       = 4
 
-# 負載時刻表（from load_pattern.txt，已修正為 4 組）
+# 負載時刻表（配合 load_pattern.txt — 全天 4 組全開）
 LOAD_SCHEDULE = [
-    (dtime( 0, 0), 0),  (dtime( 1, 0), 0),  (dtime( 2, 0), 0),
-    (dtime( 3, 0), 0),  (dtime( 4, 0), 0),  (dtime( 5, 0), 0),
-    (dtime( 6, 0), 1),  (dtime( 7, 0), 1),  (dtime( 8, 0), 2),
-    (dtime( 9, 0), 3),  (dtime(10, 0), 4),  (dtime(11, 0), 4),
-    (dtime(12, 0), 4),  (dtime(13, 0), 4),  (dtime(14, 0), 4),
-    (dtime(15, 0), 3),  (dtime(16, 0), 3),  (dtime(17, 0), 2),
-    (dtime(18, 0), 2),  (dtime(19, 0), 1),  (dtime(20, 0), 1),
-    (dtime(21, 0), 0),  (dtime(22, 0), 0),  (dtime(23, 0), 0),
+    (dtime( 0, 0), 4),
 ]
 
 
@@ -108,7 +104,7 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
 # ═══════════════════════════════════════════════════════════════
 # 載入 & 選取 7 天
 # ═══════════════════════════════════════════════════════════════
-def load_and_select(raw_dir: Path) -> pd.DataFrame:
+def load_and_select(raw_dir: Path, force_dates=None) -> pd.DataFrame:
     """
     載入 raw CSV，只看 MPPT/Solar 品質選日期（忽略電池欄位）。
 
@@ -145,30 +141,36 @@ def load_and_select(raw_dir: Path) -> pd.DataFrame:
         except Exception as e:
             print(f"  ERR {f.name}: {e}")
 
-    # 找出所有完整度 >= 90% 且 MPPT 有訊號的日期
-    from datetime import date as ddate, timedelta
-    good_dates = sorted([d for d, v in daily.items()
-                         if v['completeness'] >= 0.90 and v['mppt_day_mean_W'] > 0.01])
-    print(f"\n  品質合格日期（完整度≥90% & MPPT>10mW）：{good_dates}")
-
-    # 找最長連續段
-    if good_dates:
-        best_run = [good_dates[0]]
-        current_run = [good_dates[0]]
-        for i in range(1, len(good_dates)):
-            if (good_dates[i] - good_dates[i-1]).days == 1:
-                current_run.append(good_dates[i])
-            else:
-                if len(current_run) > len(best_run):
-                    best_run = current_run
-                current_run = [good_dates[i]]
-        if len(current_run) > len(best_run):
-            best_run = current_run
-        selected = best_run
+    # 強制指定日期 or 自動選取
+    if force_dates:
+        selected = sorted([d for d in force_dates if d in daily])
+        missing = [d for d in force_dates if d not in daily]
+        if missing:
+            print(f"\n  [警告] 指定日期但找不到資料：{missing}")
+        print(f"\n  使用指定日期 ({len(selected)} 天)：")
     else:
-        # fallback: 取完整度最高的 6 天
-        ranked = sorted(daily.items(), key=lambda x: x[1]['completeness'], reverse=True)
-        selected = sorted([d for d, _ in ranked[:6]])
+        from datetime import timedelta
+        good_dates = sorted([d for d, v in daily.items()
+                             if v['completeness'] >= 0.90 and v['mppt_day_mean_W'] > 0.01])
+        print(f"\n  品質合格日期（完整度≥90% & MPPT>10mW）：{good_dates}")
+
+        # 找最長連續段
+        if good_dates:
+            best_run = [good_dates[0]]
+            current_run = [good_dates[0]]
+            for i in range(1, len(good_dates)):
+                if (good_dates[i] - good_dates[i-1]).days == 1:
+                    current_run.append(good_dates[i])
+                else:
+                    if len(current_run) > len(best_run):
+                        best_run = current_run
+                    current_run = [good_dates[i]]
+            if len(current_run) > len(best_run):
+                best_run = current_run
+            selected = best_run
+        else:
+            ranked = sorted(daily.items(), key=lambda x: x[1]['completeness'], reverse=True)
+            selected = sorted([d for d, _ in ranked[:6]])
 
     print(f"\n  選定 {len(selected)} 天（最長連續段）：")
     for d in selected:
@@ -197,8 +199,8 @@ def simulate_soc(df: pd.DataFrame) -> np.ndarray:
     注意：真實 SoC 計算會由 RL env 內部處理。
     此處只提供「被動充電」的 SoC 參考序列作為 dataset 欄位。
     """
-    cap_wh = BATTERY_CAPACITY_WH  # ≈ 0.0705 Wh
-    max_charge_w = BATTERY_CHARGE_I_MA * BATTERY_CHARGE_V / 1000  # 0.17 W
+    cap_wh = BATTERY_CAPACITY_WH  # 3.36 Wh
+    max_charge_w = BATTERY_CHARGE_I_MA * BATTERY_CHARGE_V / 1000  # 0.425 W
     efficiency = 0.85
 
     soc = np.zeros(len(df), dtype=float)
@@ -290,12 +292,19 @@ def aggregate_15min(df: pd.DataFrame) -> pd.DataFrame:
     agg['Solar']       = agg['mppt_p_mean_W'] / 1000.0  # W → kW
     agg['Consumption'] = agg['load_W'] / 1000.0          # W → kW
 
-    # 電價模型（TOU）
-    base_price = 0.15
-    agg['price'] = np.where(
-        (agg['hour'] >= 8) & (agg['hour'] <= 18),
-        base_price * 1.2, base_price * 0.8
-    )
+    # 電價模型（2026 台電夏月 TOU）
+    def get_tou_price(hour, dow):
+        if dow >= 5:  # 週末
+            return 2.06
+        if 0 <= hour < 9:
+            return 2.06   # 離峰
+        elif 9 <= hour < 16:
+            return 4.69   # 半尖峰
+        elif 16 <= hour < 22:
+            return 7.13   # 尖峰
+        else:
+            return 4.69   # 晚間半尖峰
+    agg['price'] = [get_tou_price(h, d) for h, d in zip(agg['hour'], agg['day_of_week'])]
 
     return agg
 
@@ -304,15 +313,23 @@ def aggregate_15min(df: pd.DataFrame) -> pd.DataFrame:
 # 主流程
 # ═══════════════════════════════════════════════════════════════
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--dates', nargs='+', help='指定日期 e.g. 2026-03-05 2026-03-06 ...')
+    args = parser.parse_args()
+
+    force_dates = None
+    if args.dates:
+        force_dates = [ddate.fromisoformat(d) for d in args.dates]
+
     print("=" * 60)
     print("  Training Dataset Builder")
-    print("  電池：10 mAh / 20 mA / 8.5V(充) / 5.6V(放)")
-    print("  負載：4 組 x 12W @5V")
+    print("  電池：600 mAh / 50 mA / 8.5V(充) / 5.6V(放)")
+    print("  負載：4 組 x 100mW")
     print("=" * 60)
 
-    # 1. 載入 & 選 7 天
-    print("\n[1/4] 載入資料 & 選取最佳 7 天...")
-    df, selected_dates = load_and_select(RAW_DIR)
+    # 1. 載入 & 選日期
+    print("\n[1/4] 載入資料 & 選取日期...")
+    df, selected_dates = load_and_select(RAW_DIR, force_dates=force_dates)
 
     # 2. 注入負載
     print("\n[2/4] 注入負載模式...")
@@ -323,7 +340,7 @@ def main():
     load_summary = df.groupby('load_groups')['load_W'].count()
     print("  負載分佈（採樣數）：")
     for n, cnt in load_summary.items():
-        print(f"    {int(n)} 組 ({int(n)*12}W)：{cnt:,} 筆")
+        print(f"    {int(n)} 組 ({int(n)*100}mW)：{cnt:,} 筆")
 
     # 3. SoC 模擬（被動充電）
     print("\n[3/4] SoC 模擬（MPPT→電池被動充電）...")
@@ -417,14 +434,14 @@ def plot_training_summary(df_raw: pd.DataFrame, df_agg: pd.DataFrame):
     ax1.set_ylim(-0.5, 4.5)
     ax1.set_yticks([0, 1, 2, 3, 4])
     ax1.grid(alpha=0.3)
-    ax1.set_title('Load Pattern (controlled, 0-4 groups × 8W)')
+    ax1.set_title('Load Pattern (controlled, 0-4 groups x 100mW)')
 
     # SoC（被動充電模擬）
     ax2.plot(df_raw['timestamp'], df_raw['soc_estimated'] * 100, color='#4682B4', linewidth=0.8)
     ax2.set_ylabel('SoC (%)')
     ax2.set_ylim(-5, 105)
     ax2.grid(alpha=0.3)
-    ax2.set_title('SoC (simulated passive charging, 10 mAh battery)')
+    ax2.set_title('SoC (simulated passive charging, 600 mAh battery)')
 
     axes[-1].xaxis.set_major_formatter(mdates.DateFormatter('%m/%d'))
     axes[-1].xaxis.set_major_locator(mdates.DayLocator())

@@ -28,7 +28,13 @@ Data Flow:
                                       │
                               ┌───────▼────────┐
                               │  SAC Agent      │
-                              │  → action       │
+                              │  → raw action   │
+                              └───────┬────────┘
+                                      │
+                              ┌───────▼────────┐
+                              │  CORAL Safety   │
+                              │  CRTSN → OCC    │
+                              │  → safe action  │
                               └───────┬────────┘
                                       │
   ┌──────────┐  Command.txt   ┌───────▼────────┐
@@ -37,7 +43,7 @@ Data Flow:
 
 單位約定（SLFB 鋅空氣電池，P302 主控板）：
   - MPPT_P in Data.txt : mW（800 = 800 mW = 0.8 W）
-  - power in Command.txt : mW（112 = 112 mW = 0.112 W max）
+  - power in Command.txt : mW（280 = 280 mW = 0.280 W max）
   - flow in Command.txt  : %（25 = 25%）
   - 模型內部使用 kW
 
@@ -79,27 +85,34 @@ from io_protocol import (
     parse_ts,
     TZ_UTC8,
 )
+from safety_net import (
+    SafetyNet,
+    update_conformal_residual,
+    set_conformal_params,
+    get_residual_count,
+    clear_residual_buffer,
+)
 
 # ══════════════════════════════════════════════════════════════════
-# 硬體常數設定（最終定案版：系統電流 20mA，充放電 12hr）
+# 硬體常數設定（系統電流 50mA，充放電 12hr）
 # ══════════════════════════════════════════════════════════════════
 BATTERY_CHARGE_V      = 8.5         # V (單槽充電電壓維持 8.5V)
 BATTERY_DISCHARGE_V   = 5.6         # V (放電電壓 1.4V * 4串聯)
 
 # [系統電流與時間]
-_system_current_a     = 0.02        # 系統絕對電流 20 mA = 0.02 A
+_system_current_a     = 0.05        # 系統電流 50 mA = 0.05 A（實測負載端日間平均）
 DISCHARGE_HOURS       = 12.0        # 最高充放電時間 12 hr
 
 # [系統最大功率 (kW)]
-# 算式: 5.6 V * 0.02 A = 0.112 W
-BATTERY_PMAX_KW       = (_system_current_a * BATTERY_DISCHARGE_V) / 1000  # 0.000112 kW
+# 算式: 5.6 V * 0.05 A = 0.280 W
+BATTERY_PMAX_KW       = (_system_current_a * BATTERY_DISCHARGE_V) / 1000  # 0.000280 kW
 
 # [系統總容量 (mAh & Wh)]
-# 算式: 20 mA * 12 hr = 240 mAh
-# 算式: 0.112 W * 12 hr = 1.344 Wh
-BATTERY_CAPACITY_MAH  = _system_current_a * 1000 * DISCHARGE_HOURS        # 240.0 mAh
-BATTERY_CAPACITY_WH   = (_system_current_a * BATTERY_DISCHARGE_V) * DISCHARGE_HOURS  # 1.344 Wh
-BATTERY_CAPACITY_KWH  = BATTERY_CAPACITY_WH / 1000                        # 0.001344 kWh
+# 算式: 50 mA * 12 hr = 600 mAh
+# 算式: 0.280 W * 12 hr = 3.36 Wh
+BATTERY_CAPACITY_MAH  = _system_current_a * 1000 * DISCHARGE_HOURS        # 600.0 mAh
+BATTERY_CAPACITY_WH   = (_system_current_a * BATTERY_DISCHARGE_V) * DISCHARGE_HOURS  # 3.36 Wh
+BATTERY_CAPACITY_KWH  = BATTERY_CAPACITY_WH / 1000                        # 0.00336 kWh
 
 BATTERY_EFFICIENCY    = 0.85        # 系統轉換效率
 
@@ -107,8 +120,8 @@ BATTERY_EFFICIENCY    = 0.85        # 系統轉換效率
 # 負載規格 (經廠商確認)
 # ══════════════════════════════════════════════════════════════════
 # 算式: 8.0 W * 4組 = 32.0 W
-LOAD_PER_GROUP_W      = 8.0         # 單組負載 (W)
-MAX_LOAD_GROUPS       = 4           # 總負載 32.0 W
+LOAD_PER_GROUP_W      = 0.1         # 單組負載 100mW = 0.1W（實測日間平均）
+MAX_LOAD_GROUPS       = 4           # 總負載 0.4 W (400 mW)
 
 # 負載時刻表（0-4 組，每組 8W）
 LOAD_SCHEDULE = [
@@ -605,6 +618,8 @@ class DeploymentLogger:
         'action_power_kw', 'action_flow_pct',
         'power_mw_cmd', 'flow_pct_cmd', 'situation_code',
         'load_groups',
+        'coral_active', 'coral_clipped', 'coral_delta_mW',
+        'coral_interventions', 'coral_residual_count', 'action_raw_kw',
     ]
 
     def __init__(self, log_dir: str):
@@ -651,19 +666,56 @@ def main():
     parser.add_argument("--initial-action", type=str, default="standby",
                         choices=["standby", "random"],
                         help="首次 15 分鐘的動作（standby=待機, random=隨機）")
+    # ── CORAL SafetyNet 參數 ──
+    parser.add_argument("--coral", action="store_true", default=True,
+                        help="啟用 CORAL SafetyNet（預設啟用）")
+    parser.add_argument("--no-coral", dest="coral", action="store_false",
+                        help="停用 CORAL SafetyNet")
+    parser.add_argument("--coral-delta", type=float, default=0.15,
+                        help="Conformal 分位數 delta（越小越保守，預設 0.15）")
+    parser.add_argument("--coral-buffer", type=float, default=0.03,
+                        help="SoC 安全緩衝區比例（預設 0.03）")
+    parser.add_argument("--coral-window", type=int, default=96,
+                        help="Conformal 殘差視窗（步數，預設 96 = 1 天）")
     args = parser.parse_args()
 
     # ── 初始化 ──────────────────────────────────────────────
     print("=" * 70)
-    print("  P302 即時部署控制迴圈")
-    print("  電池: 10mAh / 20mA / 8.5V(充) / 5.6V(放)")
-    print("  負載: 4 組 × 12W @5V")
+    print("  P302 即時部署控制迴圈 + CORAL SafetyNet")
+    print("  電池: 600mAh / 50mA / 8.5V(充) / 5.6V(放)")
+    print("  負載: 4 組 × 100mW")
+    print("  CORAL: CRTSN + OCC + Adaptive Loop")
     print("=" * 70)
 
     device = "cuda" if (args.device == "cuda" and torch.cuda.is_available()) else "cpu"
     agent, action_dim = load_agent(args.model_path, state_dim=6, device=device)
     is_2d = (action_dim >= 2)
     print(f"  Action 維度: {action_dim} ({'power+flow' if is_2d else 'power only'})")
+
+    # ── CORAL SafetyNet 初始化 ──
+    safety_net = None
+    if args.coral:
+        set_conformal_params(window=args.coral_window, delta=args.coral_delta)
+        clear_residual_buffer()
+        safety_net = SafetyNet(
+            battery_capacity_kwh=BATTERY_CAPACITY_KWH,
+            battery_power_kw=BATTERY_PMAX_KW,
+            battery_efficiency=BATTERY_EFFICIENCY,
+            soc_min=0.10,
+            soc_max=0.95,
+            initial_buffer_ratio=args.coral_buffer,
+            min_buffer_ratio=0.01,
+            boundary_epsilon=0.005,
+            time_step=0.25,  # 15 分鐘 = 0.25 hr
+            n_step_preview=2,
+            enable_n_step_preview=True,
+        )
+        print(f"  CORAL SafetyNet: ON (delta={args.coral_delta}, buffer={args.coral_buffer})")
+    else:
+        print(f"  CORAL SafetyNet: OFF")
+
+    # CORAL 統計
+    coral_stats = {'interventions': 0, 'total_steps': 0, 'total_delta_kw': 0.0}
 
     soc_tracker = SoCTracker(initial_soc=args.initial_soc)
     buffer = DataBuffer(window_sec=args.window_min * 60)
@@ -784,9 +836,35 @@ def main():
                     flow_pct = abs(power_norm) * 100.0
 
                 # 功率 kW（正=充電, 負=放電）
-                action_kw = power_norm * BATTERY_PMAX_KW
+                action_kw_raw = power_norm * BATTERY_PMAX_KW
+                action_kw = action_kw_raw
 
-                # SoC 安全檢查
+                # ── CORAL SafetyNet 投影 ──
+                coral_clipped = False
+                coral_delta_kw = 0.0
+                if safety_net is not None:
+                    state_soc = np.array([soc], dtype=np.float32)
+                    action_arr = np.array([action_kw_raw], dtype=np.float32)
+                    proj_result = safety_net.project(state_soc, action_arr)
+                    action_kw_safe = float(proj_result[0]) if isinstance(proj_result[0], (int, float)) else float(proj_result[0][0])
+                    info_proj = proj_result[1] if len(proj_result) > 1 else {}
+                    coral_clipped = info_proj.get('clipped', abs(action_kw_safe - action_kw_raw) > 1e-8)
+                    coral_delta_kw = abs(action_kw_safe - action_kw_raw)
+                    action_kw = action_kw_safe
+
+                    # 更新 CORAL 統計
+                    coral_stats['total_steps'] += 1
+                    if coral_clipped:
+                        coral_stats['interventions'] += 1
+                        coral_stats['total_delta_kw'] += coral_delta_kw
+                        print(f"  🛡️ CORAL 介入: {action_kw_raw*1e6:.1f}mW → {action_kw*1e6:.1f}mW "
+                              f"(Δ={coral_delta_kw*1e6:.1f}mW, SoC={soc*100:.1f}%)")
+
+                    # 更新 Conformal 殘差（用 SoC 預測誤差的代理值）
+                    # 部署時無法真正預測 SoC，用動作修正量作為殘差指標
+                    update_conformal_residual(coral_delta_kw)
+
+                # SoC 硬性安全檢查（最後一道防線）
                 if soc <= 0.10 and action_kw < 0:
                     action_kw = 0.0
                     print(f"  ⚠ SoC 過低 ({soc*100:.1f}%)，禁止放電")
@@ -806,6 +884,12 @@ def main():
                 print(f"    功率: {power_mw_display:.1f} mW = {power_w:.4f} W")
                 print(f"    流速: {flow_pct:.0f}%")
                 print(f"    raw action: {action_norm}")
+                if safety_net is not None:
+                    raw_mw = abs(action_kw_raw) * 1e6
+                    safe_mw = abs(action_kw) * 1e6
+                    tag = "🛡️ CORAL修正" if coral_clipped else "✓ CORAL通過"
+                    print(f"    {tag}: raw={raw_mw:.1f}mW → safe={safe_mw:.1f}mW "
+                          f"(殘差池={get_residual_count()}筆)")
 
                 # 更新記憶
                 last_power_w = power_w
@@ -868,6 +952,12 @@ def main():
                     'flow_pct_cmd': f'{flow_pct:.1f}',
                     'situation_code': sit_code,
                     'load_groups': load_groups,
+                    'coral_active': 1 if safety_net is not None else 0,
+                    'coral_clipped': 1 if coral_clipped else 0,
+                    'coral_delta_mW': f'{coral_delta_kw*1e6:.2f}',
+                    'coral_interventions': coral_stats['interventions'],
+                    'coral_residual_count': get_residual_count(),
+                    'action_raw_kw': f'{action_kw_raw:.8f}',
                 })
 
                 # ── F) 重置 buffer ────────────────────────
@@ -925,6 +1015,12 @@ def main():
         print(f"  控制迴圈已停止 (Ctrl+C)")
         print(f"  總步數: {step_count}")
         print(f"  最終 SoC: {soc_tracker.get_soc()*100:.1f}%")
+        if safety_net is not None and coral_stats['total_steps'] > 0:
+            rate = coral_stats['interventions'] / coral_stats['total_steps'] * 100
+            print(f"  CORAL 介入次數: {coral_stats['interventions']}/{coral_stats['total_steps']} ({rate:.1f}%)")
+            if coral_stats['interventions'] > 0:
+                avg_delta = coral_stats['total_delta_kw'] / coral_stats['interventions']
+                print(f"  CORAL 平均修正: {avg_delta*1e6:.1f} mW")
         print(f"  日誌: {logger.path}")
         print(f"{'='*60}")
 

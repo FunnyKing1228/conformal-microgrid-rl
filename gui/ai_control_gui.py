@@ -9,9 +9,8 @@ P302 微電網 AI 控制介面 — CORAL Framework
   3. 待機 / 手動         → control/solar_test_collect.py (scenario 4)
 
 SLFB 鋅空氣電池規格（預設，P302 主控板）：
-  容量  : 10 mAh ≈ 0.07 Wh
-  功率  : 0.112W (5.6V × 20mA)，容量 240mAh = 1.344Wh
-  放電  : 20 mA × 5.6V = 112 mW
+  功率  : 0.280W (5.6V × 50mA)，容量 600mAh = 3.36Wh
+  放電  : 50 mA × 5.6V = 280 mW
   效率  : 85% RTE
 """
 
@@ -383,7 +382,7 @@ class AIControlGUI(tk.Tk):
         self.load_count_var = tk.StringVar(value=str(self.config.get("load_count", 4)))
         ttk.Spinbox(row_load, from_=0, to=4, textvariable=self.load_count_var,
                      width=5).pack(side="left", padx=4)
-        ttk.Label(row_load, text="(每組 8W，4 組 = 32W)").pack(side="left")
+        ttk.Label(row_load, text="(每組 ~100mW，4 組 ≈ 400mW)").pack(side="left")
 
         # 電池 PP ID
         row_pp = ttk.Frame(frm_common)
@@ -428,9 +427,9 @@ class AIControlGUI(tk.Tk):
         frm_info.pack(fill="x", padx=pad, pady=2)
 
         info_text = (
-            "  SLFB: 系統電流 20mA，充放電 12hr\n"
-            "  容量: 240 mAh = 1.344 Wh\n"
-            "  功率: 0.112W (5.6V × 20mA)\n"
+            "  SLFB: 系統電流 50mA，充放電 12hr\n"
+            "  容量: 600 mAh = 3.36 Wh\n"
+            "  功率: 0.280W (5.6V × 50mA)\n"
             "  充電: 8.5V  放電: 5.6V  效率: 85% RTE\n"
             "  Command.txt: 功率(mW) + 流速(0-100%) + Scenario(1-4)\n"
             "  Scenario: 1=放電全包 2=放電+市電 3=市電充電 4=待機"
@@ -578,9 +577,10 @@ class AIControlGUI(tk.Tk):
             "--device", device,
             "--log-dir", os.path.normpath(log_dir),
             "--initial-action", initial_action,
+            "--coral",  # 啟用 CORAL SafetyNet
         ]
 
-        return cmd, "AI 控制 (CORAL)"
+        return cmd, "AI 控制 (SAC + CORAL)"
 
     def _build_solar_cmd(self, data_file, command_file, pp, load_count):
         """建構太陽能測試命令"""

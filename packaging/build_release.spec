@@ -32,14 +32,11 @@ a = Analysis(
         # SoH predictor
         (os.path.join(PROJECT_ROOT, 'core', 'soh_predictor'),      'core/soh_predictor'),
 
-        # 模型權重 (v7 best)
-        (os.path.join(PROJECT_ROOT, 'experiments', 'sac_experiment_20260228_174108',
-                       'models', 'best_sac_model.pth'),             'models'),
+        # 模型權重 (latest best — 50mA/100mW specs)
+        (os.path.join(PROJECT_ROOT, 'models', 'best_sac_model.pth'),  'models'),
 
         # 設定檔
         (os.path.join(PROJECT_ROOT, 'configs', 'config_p302_sim.yaml'),  'configs'),
-        (os.path.join(PROJECT_ROOT, 'experiments', 'sac_experiment_20260228_174108',
-                       'configs', 'experiment_config.yaml'),               'configs'),
 
         # 訓練資料（參考用）
         (os.path.join(PROJECT_ROOT, 'data', 'processed', 'training_7day_15min.csv'),

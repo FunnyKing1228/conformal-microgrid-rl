@@ -33,9 +33,9 @@ Flow Rate 電化學等效模型（SLFB Synthetic Model）：
 import os
 
 # ──────────────────────────────────────────────────────────────
-# 電池參數（最終定案：系統電流 20mA，充放電 12hr）
+# 電池參數（系統電流 50mA，充放電 12hr）
 # ──────────────────────────────────────────────────────────────
-_SYSTEM_CURRENT_A       = 0.02           # 系統絕對電流 20 mA = 0.02 A
+_SYSTEM_CURRENT_A       = 0.05           # 系統電流 50 mA = 0.05 A（實測負載端日間平均）
 DISCHARGE_HOURS         = 12.0           # 最高充放電時間 12 hr
 BATTERY_CHARGE_V        = 8.5            # V（充電電壓）
 BATTERY_DISCHARGE_V     = 5.6            # V（放電電壓 1.4V × 4串聯）
@@ -52,10 +52,10 @@ BATTERY_EFFICIENCY      = 0.85           # 系統轉換效率
 # Flow Rate 電化學等效模型參數
 # ──────────────────────────────────────────────────────────────
 # 基線內阻 R_base = (V_charge - V_discharge) / (2 × I_rated)
-# 算式: (8.5 - 5.6) / (2 × 0.02) = 72.5 Ω
+# 算式: (8.5 - 5.6) / (2 × 0.05) = 29.0 Ω
 FLOW_R_BASE_OHM         = (BATTERY_CHARGE_V - BATTERY_DISCHARGE_V) / (2 * _SYSTEM_CURRENT_A)  # 72.5 Ω
 # 幫浦最大寄生功率 ≈ 15% 放電功率
-# 算式: 0.112 W × 0.15 = 0.0168 W (16.8 mW)
+# 算式: 0.280 W × 0.15 = 0.042 W (42 mW)
 FLOW_P_MAX_PUMP_W       = BATTERY_POWER_W * 0.15
 # 內阻增幅因子（可調超參）
 FLOW_K_R                = 0.5
@@ -63,18 +63,18 @@ FLOW_K_R                = 0.5
 FLOW_V_OCV_CHARGE       = BATTERY_CHARGE_V     # 8.5 V
 FLOW_V_OCV_DISCHARGE    = BATTERY_DISCHARGE_V  # 5.6 V
 # 額定電流
-FLOW_I_RATED_A          = _SYSTEM_CURRENT_A    # 0.020 A
+FLOW_I_RATED_A          = _SYSTEM_CURRENT_A    # 0.050 A
 
 # ──────────────────────────────────────────────────────────────
 # 負載參數
 # ──────────────────────────────────────────────────────────────
 LOAD_GROUPS             = 4              # 組數
-LOAD_PER_GROUP_W        = 8.0            # 每組功率 (W)（廠商確認）
+LOAD_PER_GROUP_W        = 0.1            # 每組功率 100mW = 0.1W（實測日間平均）
 LOAD_VOLTAGE            = 5.0            # V
-LOAD_MAX_W              = LOAD_GROUPS * LOAD_PER_GROUP_W   # 32.0 W
-LOAD_MAX_KW             = LOAD_MAX_W / 1000                # 0.032 kW
-# 注意：BATTERY_POWER_W (0.112W) << LOAD_MAX_W (32W)
-# 電池不可能獨立供電（Scenario 1 不可行）
+LOAD_MAX_W              = LOAD_GROUPS * LOAD_PER_GROUP_W   # 0.4 W (400 mW)
+LOAD_MAX_KW             = LOAD_MAX_W / 1000                # 0.0004 kW
+# 注意：BATTERY_POWER_W (0.280W) vs LOAD_MAX_W (0.4W) → 電池可覆蓋 70% 負載
+# Scenario 1（電池獨立供電）在太陽能輔助下有可能達成
 
 # ──────────────────────────────────────────────────────────────
 # MPPT/PV 參數（從實測統計）
